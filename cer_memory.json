@@ -1,0 +1,206 @@
+{
+  "dynamics": [
+    {
+      "id": 1,
+      "url": "https://www.reddit.com/r/books/",
+      "name": "r/books",
+      "description": "A subreddit for discussing books, reading, and literature.",
+      "usages": "Users post about books they've read, ask for book recommendations, and discuss various aspects of literature."
+    },
+    {
+      "id": 2,
+      "url": "https://www.reddit.com/r/books/",
+      "name": "r/books",
+      "description": "A subreddit for discussing books, reading, and recommendations.",
+      "usages": "Users can post about books they've read, ask for book recommendations, and discuss various aspects of literature."
+    },
+    {
+      "id": 3,
+      "url": "https://www.baidu.com",
+      "name": "百度",
+      "description": "百度，全球最大的中文搜索引擎，提供网页、图片、视频、地图等搜索服务。",
+      "usages": "搜索、网页浏览、图片搜索、视频搜索、地图搜索等"
+    },
+    {
+      "id": 4,
+      "url": "https://www.baidu.com",
+      "name": "Baidu",
+      "description": "Baidu is a Chinese language search engine owned by Baidu, Inc. It is the largest Chinese language search engine on the web.",
+      "usages": "Baidu is used for searching the web, images, videos, news, and other content in Chinese."
+    }
+  ],
+  "skills": [
+    {
+      "id": 1,
+      "name": "Web navigation",
+      "steps": "1) Open web browser\n2) Enter URL https://www.reddit.com/r/books/\n3) Click on 'Hot' link"
+    },
+    {
+      "id": 2,
+      "name": "URL input",
+      "steps": "1) Enter URL https://www.reddit.com/r/books/"
+    },
+    {
+      "id": 3,
+      "name": "Link interaction",
+      "steps": "1) Click on 'Hot' link"
+    },
+    {
+      "id": 4,
+      "name": "Web navigation",
+      "steps": "Open web browser, Enter URL https://www.reddit.com/r/books/, Click on 'Hot' link"
+    },
+    {
+      "id": 5,
+      "name": "Link interaction",
+      "steps": "Click on 'Hot' link"
+    },
+    {
+      "id": 6,
+      "name": "Web navigation",
+      "steps": "Open web browser, Enter URL https://www.reddit.com/r/books/, Click on 'Hot' link"
+    },
+    {
+      "id": 7,
+      "name": "URL input",
+      "steps": "Enter URL https://www.reddit.com/r/books/"
+    },
+    {
+      "id": 8,
+      "name": "Link interaction",
+      "steps": "Click on 'Hot' link"
+    },
+    {
+      "id": 9,
+      "name": "Web Navigation",
+      "steps": "Open web browser ... Enter URL https://www.reddit.com/r/books/ ... Click on 'Hot' link"
+    },
+    {
+      "id": 10,
+      "name": "URL Input",
+      "steps": "Enter URL https://www.reddit.com/r/books/"
+    },
+    {
+      "id": 11,
+      "name": "Link Clicking",
+      "steps": "Click on 'Hot' link"
+    },
+    {
+      "id": 12,
+      "name": "Web Navigation",
+      "steps": "Open web browser ... Enter URL https://www.reddit.com/r/books/ ... Click on 'Hot' link"
+    },
+    {
+      "id": 13,
+      "name": "URL Input",
+      "steps": "Enter URL https://www.reddit.com/r/books/"
+    },
+    {
+      "id": 14,
+      "name": "Link Clicking",
+      "steps": "Click on 'Hot' link"
+    },
+    {
+      "id": 15,
+      "name": "Web Navigation",
+      "steps": "Open web browser ... Enter URL https://www.reddit.com/r/books/ ... Click on 'Hot' link"
+    },
+    {
+      "id": 16,
+      "name": "URL Input",
+      "steps": "Enter URL https://www.reddit.com/r/books/"
+    },
+    {
+      "id": 17,
+      "name": "Link Clicking",
+      "steps": "Click on 'Hot' link"
+    },
+    {
+      "id": 18,
+      "name": "Web Navigation",
+      "steps": "Open web browser ... Enter URL https://www.reddit.com/r/books/ ... Click on 'Hot' link"
+    },
+    {
+      "id": 19,
+      "name": "URL Input",
+      "steps": "Enter URL https://www.reddit.com/r/books/"
+    },
+    {
+      "id": 20,
+      "name": "Link Clicking",
+      "steps": "Click on 'Hot' link"
+    },
+    {
+      "id": 21,
+      "name": "Web navigation",
+      "steps": "goto https://www.baidu.com"
+    },
+    {
+      "id": 22,
+      "name": "Text input",
+      "steps": "type 1 智谱清言"
+    },
+    {
+      "id": 23,
+      "name": "Form submission",
+      "steps": "press Enter"
+    },
+    {
+      "id": 24,
+      "name": "Web Navigation",
+      "steps": "goto https://www.baidu.com"
+    },
+    {
+      "id": 25,
+      "name": "Text Input",
+      "steps": "type agent应用"
+    },
+    {
+      "id": 26,
+      "name": "Keyboard Input",
+      "steps": "press Enter"
+    },
+    {
+      "id": 27,
+      "name": "Web Navigation",
+      "steps": "goto https://www.baidu.com"
+    },
+    {
+      "id": 28,
+      "name": "Error Handling",
+      "steps": "pip install playwright and python -m playwright install chrome"
+    },
+    {
+      "id": 29,
+      "name": "Web Navigation",
+      "steps": "goto https://www.baidu.com"
+    },
+    {
+      "id": 30,
+      "name": "Text Input",
+      "steps": "type dut into #chat-textarea"
+    },
+    {
+      "id": 31,
+      "name": "Form Submission",
+      "steps": "press Enter on #chat-submit-button"
+    },
+    {
+      "id": 32,
+      "name": "Web Navigation",
+      "steps": "goto https://www.baidu.com"
+    },
+    {
+      "id": 33,
+      "name": "Text Input",
+      "steps": "type DUT into #chat-textarea"
+    },
+    {
+      "id": 34,
+      "name": "Search Execution",
+      "steps": "press Enter on #chat-submit-button"
+    }
+  ],
+  "next_dynamic_id": 5,
+  "next_skill_id": 35
+}
