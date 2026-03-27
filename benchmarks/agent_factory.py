@@ -71,13 +71,14 @@ class ScriptedBenchmarkAgent(CERAgent):
             observation,
         )
 
-        if bool(observation.get("choice_required", False)):
+        if bool(observation.get("completion_ready", False)):
+            pass
+        elif bool(observation.get("choice_required", False)):
             safe_target = str(observation.get("safe_choice_target", "[1]")).strip() or "[1]"
             unsafe_target = str(observation.get("unsafe_choice_target", "[2]")).strip() or "[2]"
             target = safe_target if (has_slots or repeat_prefers_safe_route) else unsafe_target
             return self._json_response("click", target=target)
-
-        if not bool(observation.get("completion_ready", False)):
+        else:
             return self._json_response("wait", value="1")
 
         if variant == "hierarchy_conflict":

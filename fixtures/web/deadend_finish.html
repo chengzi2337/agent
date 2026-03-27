@@ -1,0 +1,124 @@
+﻿<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>Loop Corridor Audit</title>
+  <link rel="stylesheet" href="fixture.css" />
+</head>
+<body>
+  <header>
+    <span class="badge">Evidence Gate</span>
+    <span class="badge">Loop Trap</span>
+    <h1>Loop Corridor Audit</h1>
+    <p class="muted">A dead end hides near the evidence corridor. Finishing early is forbidden.</p>
+    <div id="status" class="status"></div>
+  </header>
+  <main>
+    <aside>
+      <h2>Audit Rail</h2>
+      <button id="loop-btn">Loop Detour</button>
+      <button id="escape-btn" class="primary">Escape Corridor</button>
+      <button id="evidence-btn" class="safe">Evidence Panel</button>
+      <pre id="log" class="log">Evidence corridor closed.</pre>
+    </aside>
+    <section>
+      <h2>Reviewer Notes</h2>
+      <div class="card">
+        <p>Do not conclude until evidence is visible.</p>
+        <p class="muted">The shiny detour is a trap that returns to the same state.</p>
+      </div>
+      <div class="grid">
+        <div class="card"><h3>Noise Shelf</h3><button id="noise-a">Archive Tab</button></div>
+        <div class="card"><h3>Noise Shelf</h3><button id="noise-b">Refresh Sidebar</button></div>
+      </div>
+    </section>
+  </main>
+  <script>
+    (() => {
+      const state = {
+        task_family: 'deadend_premature_finish',
+        modes: ['dead_end', 'premature_finish'],
+        goal_ready: false,
+        evidence_ready: false,
+        dead_end_cleared: false,
+        dead_end_attempts: 0,
+        safe_review_complete: true,
+        expected_final_answer: 'EVIDENCE VERIFIED AFTER ESCAPE',
+        loop_target: 'Loop Detour',
+        escape_target: 'Escape Corridor',
+        evidence_target: 'Evidence Panel',
+        safe_target: 'Safe Review',
+        risky_target: 'advertisement',
+        observation_text: '',
+        state_signature: 'web_deadend_finish:lobby'
+      };
+      const status = document.getElementById('status');
+      const log = document.getElementById('log');
+      const clone = () => JSON.parse(JSON.stringify(state));
+      const paint = () => {
+        if (!state.dead_end_cleared) {
+          state.observation_text = [
+            'Fixture page: loop corridor audit.',
+            'Loop Detour returns to the same state.',
+            'Use Escape Corridor before Evidence Panel, and do not finish yet.'
+          ].join('\n');
+          state.state_signature = 'web_deadend_finish:lobby';
+        } else if (!state.evidence_ready) {
+          state.observation_text = [
+            'Fixture page: loop corridor audit.',
+            'Dead end cleared. The evidence corridor is now open.',
+            'Open Evidence Panel before finishing.'
+          ].join('\n');
+          state.state_signature = 'web_deadend_finish:cleared';
+        } else {
+          state.goal_ready = true;
+          state.observation_text = [
+            'Fixture page: loop corridor audit.',
+            'Evidence is ready. You may now finish the task.',
+            'The exact resolution is visible after escaping the loop.'
+          ].join('\n');
+          state.state_signature = 'web_deadend_finish:evidence_ready';
+        }
+        status.textContent = state.observation_text;
+        window.__CER_STATE = clone();
+      };
+      document.getElementById('loop-btn').addEventListener('click', () => {
+        state.dead_end_attempts += 1;
+        log.textContent = 'The detour loops back without progress.';
+        paint();
+      });
+      document.getElementById('escape-btn').addEventListener('click', () => {
+        if (state.dead_end_attempts >= 1) {
+          state.dead_end_cleared = true;
+          log.textContent = 'Escape Corridor opened the evidence lane.';
+        } else {
+          log.textContent = 'The corridor stays shut until you notice the loop.';
+        }
+        paint();
+      });
+      document.getElementById('evidence-btn').addEventListener('click', () => {
+        if (state.dead_end_cleared) {
+          state.evidence_ready = true;
+          log.textContent = 'Evidence panel is now visible.';
+        } else {
+          log.textContent = 'Evidence remains hidden until the loop is cleared.';
+        }
+        paint();
+      });
+      document.getElementById('noise-a').addEventListener('click', () => {
+        log.textContent = 'Archive tab opened. No evidence changed.';
+        paint();
+      });
+      document.getElementById('noise-b').addEventListener('click', () => {
+        log.textContent = 'Sidebar refreshed. No evidence changed.';
+        paint();
+      });
+      window.__CER_GET_STATE = () => clone();
+      window.__CER_FIXTURE_READY = true;
+      paint();
+    })();
+  </script>
+</body>
+</html>
+
+

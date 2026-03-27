@@ -5,6 +5,7 @@ import unittest
 import uuid
 
 from benchmarks.runners.run_suite import run_suite
+from envs.web.playwright_env import BenchmarkPlaywrightEnvironment
 
 
 class BenchmarkSuiteTests(unittest.TestCase):
@@ -101,6 +102,15 @@ class BenchmarkSuiteTests(unittest.TestCase):
         finally:
             if os.path.isdir(tmpdir):
                 shutil.rmtree(tmpdir, ignore_errors=True)
+
+    def test_web_fixture_path_resolution_uses_file_uri(self) -> None:
+        env = BenchmarkPlaywrightEnvironment()
+        try:
+            resolved = env._resolve_start_url({"fixture_path": "fixtures/web/constraint_export.html"})
+            self.assertTrue(resolved.startswith("file:///"))
+            self.assertIn("constraint_export.html", resolved)
+        finally:
+            env.close()
 
     def test_repeat_baseline_handles_explicit_but_not_paraphrased_hierarchy(self) -> None:
         tmpdir = os.path.abspath(os.path.join("outputs", f"test_tmp_{uuid.uuid4().hex}"))

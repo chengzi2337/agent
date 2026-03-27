@@ -1347,9 +1347,10 @@ class CERAgent:
             add_flag("dead_end_cleared", "dead_end_cleared")
         if "safe_review_complete" in observation and ("risk" in modes or "risk" in task_family or "unsafe" in task_family):
             add_flag("safe_review_complete", "safe_review_complete")
-        if bool(observation.get("choice_required", False)):
+        selected_route = str(observation.get("selected_route", "")).strip()
+        if bool(observation.get("choice_required", False)) and not selected_route:
             missing.append("route_selection_pending")
-        if str(observation.get("selected_route", "")).strip():
+        if selected_route:
             satisfied.append("route_selected")
 
         return satisfied, missing
@@ -2298,14 +2299,57 @@ class CERAgent:
 
         normalized_target = target.lower()
         normalized_value = value.lower()
+        metadata_text = self._get_target_metadata_text(target)
         for keyword in self.security_policy.get("high_risk_keywords", []):
             normalized_keyword = str(keyword).strip().lower()
             if not normalized_keyword:
                 continue
-            if normalized_keyword in normalized_target or normalized_keyword in normalized_value:
+            if (
+                normalized_keyword in normalized_target
+                or normalized_keyword in normalized_value
+                or normalized_keyword in metadata_text
+            ):
                 return f"Security Violation: Action contains high-risk keyword '{keyword}'."
 
         return None
+
+    def _get_target_metadata_text(self, target: str) -> str:
+        """Flatten environment target metadata into searchable lowercase text."""
+
+        cleaned_target = target.strip()
+        if not cleaned_target:
+            return ""
+
+        selector_markers = ("#", ".", "[", "]", ">", ":", "//", "(", "=", "css=", "xpath=")
+        lowered_target = cleaned_target.lower()
+        looks_like_plain_text = not any(marker in cleaned_target for marker in selector_markers) and not any(
+            token in lowered_target for token in ("input", "button", "textarea", "selector", "nth-of-type")
+        )
+        if looks_like_plain_text:
+            return lowered_target
+
+        try:
+            if hasattr(self.environment, "get_target_metadata") and callable(getattr(self.environment, "get_target_metadata")):
+                metadata = getattr(self.environment, "get_target_metadata")(cleaned_target)
+            else:
+                metadata = {}
+        except Exception:
+            metadata = {}
+
+        if not isinstance(metadata, dict):
+            return ""
+
+        fields = [
+            str(metadata.get("selector", "")),
+            str(metadata.get("role", "")),
+            str(metadata.get("text", "")),
+            str(metadata.get("aria_label", "")),
+            str(metadata.get("name", "")),
+            str(metadata.get("tag", "")),
+            str(metadata.get("type", "")),
+            str(metadata.get("title", "")),
+        ]
+        return " ".join(value.strip().lower() for value in fields if value and value.strip())
 
     def _build_prompt_metadata(
         self,
