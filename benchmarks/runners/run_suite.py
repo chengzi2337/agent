@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
+import subprocess
 import sys
 from datetime import datetime
 from typing import Any, Dict, List
@@ -113,11 +115,15 @@ def run_suite(
     metadata = {
         "generated_at": datetime.now().isoformat(timespec="seconds"),
         "suite_name": suite_name,
+        "suite_version": _compute_suite_version(tasks, configs),
+        "git_commit_hash": _get_git_commit_hash(),
         "backend": backend,
         "model": model,
         "runs_per_task": runs,
         "task_count": len(tasks),
         "config_count": len(configs),
+        "task_dir": os.path.abspath(task_dir),
+        "config_dir": os.path.abspath(config_dir),
     }
     bundle_paths = write_report_bundle(
         output_dir=output_dir,
@@ -126,12 +132,39 @@ def run_suite(
         summaries=summaries,
         trials=all_trials,
         failures=failure_cases,
+        tasks=tasks,
+        configs=configs,
+        task_dir=os.path.abspath(task_dir),
+        config_dir=os.path.abspath(config_dir),
     )
     return {
         "metadata": metadata,
         "summaries": summaries,
         "paths": bundle_paths,
     }
+
+
+def _compute_suite_version(tasks: List[TaskSpec], configs: List[AgentConfigSpec]) -> str:
+    payload = {
+        "tasks": sorted(tasks, key=lambda item: str(item.get("task_id", ""))),
+        "configs": sorted(configs, key=lambda item: str(item.get("name", ""))),
+    }
+    digest_source = json.dumps(payload, ensure_ascii=True, sort_keys=True)
+    return hashlib.sha1(digest_source.encode("utf-8")).hexdigest()[:12]
+
+
+def _get_git_commit_hash() -> str:
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            check=True,
+            capture_output=True,
+            text=True,
+            cwd=os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..")),
+        )
+        return result.stdout.strip() or "unknown"
+    except Exception:
+        return "unknown"
 
 
 def main() -> None:

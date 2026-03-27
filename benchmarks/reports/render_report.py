@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 from statistics import mean
 from typing import Any, Dict, Iterable, List, Tuple
 
@@ -18,6 +19,10 @@ def write_report_bundle(
     summaries: List[ConfigSummary],
     trials: List[TrialEvaluation],
     failures: List[Dict[str, Any]],
+    tasks: List[Dict[str, Any]],
+    configs: List[Dict[str, Any]],
+    task_dir: str,
+    config_dir: str,
 ) -> Dict[str, str]:
     report_dir = os.path.join(output_dir, "reports", suite_name)
     failure_dir = os.path.join(output_dir, "failure_cases", suite_name)
@@ -28,12 +33,41 @@ def write_report_bundle(
     ablation_summaries = build_ablation_summaries(trials)
     failure_taxonomy = build_failure_taxonomy(trials)
 
+    snapshot_dir = os.path.join(report_dir, "input_snapshots")
+    task_snapshot_dir = os.path.join(snapshot_dir, "tasks")
+    config_snapshot_dir = os.path.join(snapshot_dir, "configs")
     summary_json_path = os.path.join(report_dir, "summary.json")
     summary_md_path = os.path.join(report_dir, "summary.md")
     failure_jsonl_path = os.path.join(failure_dir, "failure_cases.jsonl")
+    manifest_json_path = os.path.join(report_dir, "manifest.json")
+    raw_runs_dir = os.path.join(output_dir, "raw_runs", suite_name)
+
+    _copy_snapshot_files(task_dir, task_snapshot_dir)
+    _copy_snapshot_files(config_dir, config_snapshot_dir)
+
+    artifact_paths = {
+        "summary_json": os.path.abspath(summary_json_path),
+        "summary_md": os.path.abspath(summary_md_path),
+        "failure_jsonl": os.path.abspath(failure_jsonl_path),
+        "manifest_json": os.path.abspath(manifest_json_path),
+        "task_snapshot_dir": os.path.abspath(task_snapshot_dir),
+        "config_snapshot_dir": os.path.abspath(config_snapshot_dir),
+        "raw_runs_dir": os.path.abspath(raw_runs_dir),
+    }
+    manifest_payload = {
+        "metadata": metadata,
+        "artifact_paths": artifact_paths,
+        "task_ids": [str(task.get("task_id", "")) for task in tasks],
+        "config_names": [str(config.get("name", "")) for config in configs],
+        "task_snapshot_files": _build_snapshot_manifest(task_snapshot_dir),
+        "config_snapshot_files": _build_snapshot_manifest(config_snapshot_dir),
+    }
+    with open(manifest_json_path, "w", encoding="utf-8") as file:
+        json.dump(manifest_payload, file, ensure_ascii=False, indent=2)
 
     payload = {
         "metadata": metadata,
+        "artifact_paths": artifact_paths,
         "summaries": summaries,
         "task_family_summaries": task_family_summaries,
         "ablation_summaries": ablation_summaries,
@@ -58,11 +92,7 @@ def write_report_bundle(
         for failure in failures:
             file.write(json.dumps(failure, ensure_ascii=False) + "\n")
 
-    return {
-        "summary_json": os.path.abspath(summary_json_path),
-        "summary_md": os.path.abspath(summary_md_path),
-        "failure_jsonl": os.path.abspath(failure_jsonl_path),
-    }
+    return artifact_paths
 
 
 def render_summary_markdown(
@@ -77,9 +107,13 @@ def render_summary_markdown(
         "",
         f"- backend: {metadata['backend']}",
         f"- model: {metadata['model']}",
+        f"- suite_version: {metadata.get('suite_version', 'unknown')}",
+        f"- git_commit_hash: {metadata.get('git_commit_hash', 'unknown')}",
         f"- runs_per_task: {metadata['runs_per_task']}",
         f"- task_count: {metadata['task_count']}",
         f"- config_count: {metadata['config_count']}",
+        f"- task_dir: {metadata.get('task_dir', '')}",
+        f"- config_dir: {metadata.get('config_dir', '')}",
         "",
         "## Overall Summary",
         "",
@@ -225,3 +259,48 @@ def _rate(trials: List[TrialEvaluation], key: str) -> float:
     if not trials:
         return 0.0
     return sum(1 for trial in trials if bool(trial[key])) / len(trials)
+
+def _copy_snapshot_files(source_dir: str, destination_dir: str) -> None:
+    if os.path.isdir(destination_dir):
+        shutil.rmtree(destination_dir)
+    os.makedirs(destination_dir, exist_ok=True)
+    for root, dirnames, filenames in os.walk(source_dir):
+        dirnames[:] = [item for item in dirnames if item != "__pycache__"]
+        relative_root = os.path.relpath(root, source_dir)
+        target_root = destination_dir if relative_root == "." else os.path.join(destination_dir, relative_root)
+        os.makedirs(target_root, exist_ok=True)
+        for filename in filenames:
+            source_path = os.path.join(root, filename)
+            if not os.path.isfile(source_path):
+                continue
+            shutil.copy2(source_path, os.path.join(target_root, filename))
+
+
+def _build_snapshot_manifest(snapshot_dir: str) -> List[Dict[str, Any]]:
+    rows: List[Dict[str, Any]] = []
+    for root, _, filenames in os.walk(snapshot_dir):
+        for filename in sorted(filenames):
+            path = os.path.join(root, filename)
+            relative_path = os.path.relpath(path, snapshot_dir)
+            rows.append(
+                {
+                    "path": relative_path.replace("\\", "/"),
+                    "sha1": _file_sha1(path),
+                    "bytes": os.path.getsize(path),
+                }
+            )
+    rows.sort(key=lambda item: item["path"])
+    return rows
+
+
+def _file_sha1(path: str) -> str:
+    import hashlib
+
+    digest = hashlib.sha1()
+    with open(path, "rb") as file:
+        while True:
+            chunk = file.read(8192)
+            if not chunk:
+                break
+            digest.update(chunk)
+    return digest.hexdigest()

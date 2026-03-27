@@ -28,13 +28,25 @@ class BenchmarkSuiteTests(unittest.TestCase):
             self.assertTrue(os.path.exists(report["paths"]["summary_json"]))
             self.assertTrue(os.path.exists(report["paths"]["summary_md"]))
             self.assertTrue(os.path.exists(report["paths"]["failure_jsonl"]))
+            self.assertTrue(os.path.exists(report["paths"]["manifest_json"]))
+            self.assertTrue(os.path.isdir(report["paths"]["task_snapshot_dir"]))
+            self.assertTrue(os.path.isdir(report["paths"]["config_snapshot_dir"]))
+            self.assertTrue(os.path.isdir(report["paths"]["raw_runs_dir"]))
 
             with open(report["paths"]["summary_json"], "r", encoding="utf-8") as file:
                 payload = json.load(file)
             self.assertGreater(len(payload["summaries"]), 0)
+            self.assertIn("suite_version", payload["metadata"])
+            self.assertIn("git_commit_hash", payload["metadata"])
+            self.assertIn("artifact_paths", payload)
             config_names = {item["config_name"] for item in payload["summaries"]}
             self.assertIn("vanilla", config_names)
             self.assertIn("cer_full", config_names)
+
+            with open(report["paths"]["manifest_json"], "r", encoding="utf-8") as file:
+                manifest = json.load(file)
+            self.assertGreater(len(manifest["task_snapshot_files"]), 0)
+            self.assertGreater(len(manifest["config_snapshot_files"]), 0)
         finally:
             if os.path.isdir(tmpdir):
                 shutil.rmtree(tmpdir, ignore_errors=True)
