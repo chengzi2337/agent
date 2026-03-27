@@ -1,0 +1,11 @@
+{
+  "name": "cer_full",
+  "description": "Structured slots with dead-end memory, finish gate, and static interception.",
+  "use_isolation": true,
+  "repeat_constraints_each_step": false,
+  "history_mode": "full",
+  "action_history_limit": 8,
+  "enable_dead_end_memory": true,
+  "enable_finish_gate": true,
+  "enable_static_interceptor": true
+}

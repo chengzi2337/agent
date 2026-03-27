@@ -1,0 +1,11 @@
+{
+  "name": "truncation",
+  "description": "Truncated action history without isolated slots or guards.",
+  "use_isolation": false,
+  "repeat_constraints_each_step": false,
+  "history_mode": "full",
+  "action_history_limit": 3,
+  "enable_dead_end_memory": false,
+  "enable_finish_gate": false,
+  "enable_static_interceptor": false
+}

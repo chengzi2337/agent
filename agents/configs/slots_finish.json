@@ -1,0 +1,11 @@
+{
+  "name": "slots_finish",
+  "description": "Structured slots plus finish gate.",
+  "use_isolation": true,
+  "repeat_constraints_each_step": false,
+  "history_mode": "full",
+  "action_history_limit": 8,
+  "enable_dead_end_memory": false,
+  "enable_finish_gate": true,
+  "enable_static_interceptor": false
+}

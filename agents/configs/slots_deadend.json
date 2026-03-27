@@ -1,0 +1,11 @@
+{
+  "name": "slots_deadend",
+  "description": "Structured slots plus dead-end memory.",
+  "use_isolation": true,
+  "repeat_constraints_each_step": false,
+  "history_mode": "full",
+  "action_history_limit": 8,
+  "enable_dead_end_memory": true,
+  "enable_finish_gate": false,
+  "enable_static_interceptor": false
+}

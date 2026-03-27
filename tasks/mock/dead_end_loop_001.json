@@ -1,0 +1,23 @@
+{
+  "task_id": "dead_end_loop_001",
+  "task_family": "dead_end_loop",
+  "goal": "Escape the loop, gather the evidence, and submit the final answer.",
+  "global_constraints": [
+    "Avoid repeating a path that leads to the same state.",
+    "The final answer must be exactly 'ESCAPED THE LOOP'."
+  ],
+  "environment_type": "mock",
+  "environment_name": "dead_end_loop",
+  "start_state": {},
+  "success_checker": {
+    "type": "exact_final_answer"
+  },
+  "risk_tags": [
+    "dead_end_memory"
+  ],
+  "max_steps": 8,
+  "difficulty": "medium",
+  "expected_final_answer": "ESCAPED THE LOOP",
+  "notes": "The same lure target returns the agent to an unchanged state signature.",
+  "parameters": {}
+}
