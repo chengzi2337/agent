@@ -1,5 +1,6 @@
 import json
 import os
+import shutil
 import unittest
 import uuid
 
@@ -36,8 +37,102 @@ class BenchmarkSuiteTests(unittest.TestCase):
             self.assertIn("cer_full", config_names)
         finally:
             if os.path.isdir(tmpdir):
-                import shutil
+                shutil.rmtree(tmpdir, ignore_errors=True)
 
+    def test_cer_full_triple_mix_recovers_after_blocked_action(self) -> None:
+        tmpdir = os.path.abspath(os.path.join("outputs", f"test_tmp_{uuid.uuid4().hex}"))
+        task_dir = os.path.join(tmpdir, "tasks")
+        config_dir = os.path.join(tmpdir, "configs")
+        os.makedirs(task_dir, exist_ok=True)
+        os.makedirs(config_dir, exist_ok=True)
+        shutil.copyfile(
+            os.path.join("tasks", "mock", "triple_mix_001.json"),
+            os.path.join(task_dir, "triple_mix_001.json"),
+        )
+        shutil.copyfile(
+            os.path.join("agents", "configs", "cer_full.json"),
+            os.path.join(config_dir, "cer_full.json"),
+        )
+        try:
+            report = run_suite(
+                suite_name="triple_mix_recovery",
+                task_dir=os.path.abspath(task_dir),
+                config_dir=os.path.abspath(config_dir),
+                backend="local",
+                runs=1,
+                output_dir=tmpdir,
+                model="local-scripted",
+                max_steps_override=0,
+                failure_tail_steps=3,
+            )
+
+            with open(report["paths"]["summary_json"], "r", encoding="utf-8") as file:
+                payload = json.load(file)
+
+            trial = next(
+                item
+                for item in payload["trials"]
+                if item["task_id"] == "triple_mix_001" and item["config_name"] == "cer_full"
+            )
+            self.assertTrue(trial["success"])
+
+            with open(trial["raw_run_path"], "r", encoding="utf-8") as file:
+                raw_run = json.load(file)
+
+            rejected_finishes = [
+                item
+                for item in raw_run["result"]["trajectory"]
+                if isinstance(item, dict) and item.get("finish_rejected")
+            ]
+            self.assertGreaterEqual(len(rejected_finishes), 1)
+            self.assertEqual(rejected_finishes[0].get("termination_routing", {}).get("route"), "BLOCK")
+        finally:
+            if os.path.isdir(tmpdir):
+                shutil.rmtree(tmpdir, ignore_errors=True)
+
+    def test_repeat_baseline_handles_explicit_but_not_paraphrased_hierarchy(self) -> None:
+        tmpdir = os.path.abspath(os.path.join("outputs", f"test_tmp_{uuid.uuid4().hex}"))
+        task_dir = os.path.join(tmpdir, "tasks")
+        config_dir = os.path.join(tmpdir, "configs")
+        os.makedirs(task_dir, exist_ok=True)
+        os.makedirs(config_dir, exist_ok=True)
+        for task_name in [
+            "constraint_drowning_hierarchy_001.json",
+            "constraint_drowning_hierarchy_002.json",
+        ]:
+            shutil.copyfile(
+                os.path.join("tasks", "mock", task_name),
+                os.path.join(task_dir, task_name),
+            )
+        shutil.copyfile(
+            os.path.join("agents", "configs", "repeat_constraints.json"),
+            os.path.join(config_dir, "repeat_constraints.json"),
+        )
+        try:
+            report = run_suite(
+                suite_name="repeat_hierarchy_shape",
+                task_dir=os.path.abspath(task_dir),
+                config_dir=os.path.abspath(config_dir),
+                backend="local",
+                runs=1,
+                output_dir=tmpdir,
+                model="local-scripted",
+                max_steps_override=0,
+                failure_tail_steps=2,
+            )
+
+            with open(report["paths"]["summary_json"], "r", encoding="utf-8") as file:
+                payload = json.load(file)
+
+            trials = {
+                item["task_id"]: item
+                for item in payload["trials"]
+                if item["config_name"] == "repeat_constraints"
+            }
+            self.assertTrue(trials["constraint_drowning_hierarchy_001"]["success"])
+            self.assertFalse(trials["constraint_drowning_hierarchy_002"]["success"])
+        finally:
+            if os.path.isdir(tmpdir):
                 shutil.rmtree(tmpdir, ignore_errors=True)
 
 

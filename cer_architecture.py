@@ -960,12 +960,19 @@ class CERAgent:
 
             step += 1
             current_observation = self._get_environment_observation()
+            termination_routing = self._build_termination_routing_state(
+                task_goal=normalized_goal,
+                step=step,
+                current_observation=current_observation,
+                trajectory=trajectory,
+            )
             prompt = self._build_agent_prompt(
                 composed_context,
                 trajectory,
                 step,
                 current_observation,
                 self.global_constraints,
+                termination_routing,
                 use_isolation=use_isolation,
             )
             prompt_metadata = self._build_prompt_metadata(
@@ -973,6 +980,7 @@ class CERAgent:
                 observation=current_observation,
                 trajectory=trajectory,
                 global_constraints=self.global_constraints,
+                termination_routing=termination_routing,
                 use_isolation=use_isolation,
             )
             llm_output = ""
@@ -1014,6 +1022,7 @@ class CERAgent:
                     "pre_observation": current_observation,
                     "prompt": prompt,
                     "prompt_metadata": prompt_metadata,
+                    "termination_routing": termination_routing,
                 }
 
                 if done_by_observation:
@@ -1029,16 +1038,18 @@ class CERAgent:
             state_signature_before = self._get_environment_state_signature(current_observation)
             if action.get("type") == "finish":
                 if self.enable_finish_gate:
-                    allow_finish, finish_reason = self._should_accept_finish_action(
+                    allow_finish, finish_reason, termination_routing = self._should_accept_finish_action(
                         task_goal=normalized_goal,
                         step=step,
                         current_observation=current_observation,
                         trajectory=trajectory,
+                        termination_routing=termination_routing,
                     )
                     finish_gate_result: Dict[str, Any] = {
                         "enabled": True,
                         "allowed": allow_finish,
                         "reason": finish_reason,
+                        "route": termination_routing.get("route", ""),
                     }
                 else:
                     allow_finish = True
@@ -1047,6 +1058,7 @@ class CERAgent:
                         "enabled": False,
                         "allowed": True,
                         "reason": finish_reason,
+                        "route": termination_routing.get("route", ""),
                     }
                 if not allow_finish:
                     if self.trace_enabled:
@@ -1062,6 +1074,7 @@ class CERAgent:
                             "pre_observation": current_observation,
                             "prompt": prompt,
                             "prompt_metadata": prompt_metadata,
+                            "termination_routing": termination_routing,
                             "finish_rejected": True,
                             "finish_reject_reason": finish_reason,
                             "finish_gate_result": finish_gate_result,
@@ -1088,6 +1101,7 @@ class CERAgent:
                         "pre_observation": current_observation,
                         "prompt": prompt,
                         "prompt_metadata": prompt_metadata,
+                        "termination_routing": termination_routing,
                         "finish_gate_result": finish_gate_result,
                         "observation": "Task marked completed by model.",
                         "state_signature_before": state_signature_before,
@@ -1130,10 +1144,12 @@ class CERAgent:
                 "post_observation": post_observation,
                 "prompt": prompt,
                 "prompt_metadata": prompt_metadata,
+                "termination_routing": termination_routing,
                 "finish_gate_result": {
                     "enabled": self.enable_finish_gate,
                     "allowed": True,
                     "reason": "not_finish_action",
+                    "route": termination_routing.get("route", ""),
                 },
                 "interceptor_result": interceptor_result,
                 "observation": env_result,
@@ -1207,33 +1223,261 @@ class CERAgent:
         step: int,
         current_observation: Dict[str, Any],
         trajectory: List[Dict[str, Any]],
-    ) -> Tuple[bool, str]:
-        """Gate model-proposed finish to reduce step-1 false positives."""
+        termination_routing: Optional[Dict[str, Any]] = None,
+    ) -> Tuple[bool, str, Dict[str, Any]]:
+        """Gate model-proposed finish using explicit termination-routing evidence."""
 
+        routing = termination_routing or self._build_termination_routing_state(
+            task_goal=task_goal,
+            step=step,
+            current_observation=current_observation,
+            trajectory=trajectory,
+        )
+        route = str(routing.get("route", "CONTINUE")).strip().upper() or "CONTINUE"
+        cannot_conclude_reason = str(routing.get("cannot_conclude_reason", "")).strip()
+
+        if route == "CONCLUDE":
+            satisfied_evidence = routing.get("satisfied_evidence", [])
+            if isinstance(satisfied_evidence, list) and satisfied_evidence:
+                evidence_label = str(satisfied_evidence[0]).strip()
+            else:
+                evidence_label = "termination_routing"
+            return True, f"routing_conclude:{evidence_label}", routing
+
+        if step <= 1 and route != "CONCLUDE":
+            if not cannot_conclude_reason:
+                cannot_conclude_reason = "step_too_early_without_evidence"
+            routing["cannot_conclude_reason"] = cannot_conclude_reason
+
+        reason = cannot_conclude_reason or "completion_evidence_missing"
+        return False, f"routing_{route.lower()}:{reason}", routing
+
+    def _build_termination_routing_state(
+        self,
+        task_goal: str,
+        step: int,
+        current_observation: Dict[str, Any],
+        trajectory: List[Dict[str, Any]],
+    ) -> Dict[str, Any]:
+        """Summarize whether the agent should continue, revise, conclude, or stay blocked."""
+
+        satisfied_evidence, missing_evidence = self._extract_termination_evidence_from_observation(
+            current_observation
+        )
+        recent_failure_events = self._collect_recent_failure_events(trajectory)
         done_by_observation, _, completion_reason = self._infer_completion_from_observation(
             task_goal,
             current_observation,
         )
         if done_by_observation:
-            return True, f"observation_evidence:{completion_reason}"
+            satisfied_evidence.append(f"observation_completion:{completion_reason}")
 
-        if step <= 1:
-            return False, "step_too_early_without_evidence"
+        unique_satisfied = list(dict.fromkeys(item for item in satisfied_evidence if str(item).strip()))
+        unique_missing = list(dict.fromkeys(item for item in missing_evidence if str(item).strip()))
+        completion_ready = any(
+            item in {"completion_ready", "goal_ready", "evidence_ready"}
+            or str(item).startswith("observation_completion:")
+            for item in unique_satisfied
+        )
+        blocked_recently = any(
+            str(item.get("kind", "")).strip().lower() in {"blocked_action", "finish_rejected"}
+            for item in recent_failure_events
+            if isinstance(item, dict)
+        )
+        revise_needed = any(
+            str(item.get("kind", "")).strip().lower() in {"execution_error", "no_progress"}
+            for item in recent_failure_events
+            if isinstance(item, dict)
+        )
 
-        for event in trajectory:
-            if not isinstance(event, dict):
-                continue
+        if completion_ready and not unique_missing:
+            route = "CONCLUDE"
+            cannot_conclude_reason = ""
+        elif blocked_recently:
+            route = "BLOCK"
+            cannot_conclude_reason = self._compose_cannot_conclude_reason(unique_missing, recent_failure_events)
+        elif revise_needed:
+            route = "REVISE"
+            cannot_conclude_reason = self._compose_cannot_conclude_reason(unique_missing, recent_failure_events)
+        else:
+            route = "CONTINUE"
+            cannot_conclude_reason = self._compose_cannot_conclude_reason(unique_missing, recent_failure_events)
 
+        return {
+            "route": route,
+            "step": step,
+            "satisfied_evidence": unique_satisfied,
+            "missing_evidence": unique_missing,
+            "recent_failure_events": recent_failure_events,
+            "cannot_conclude_reason": cannot_conclude_reason,
+        }
+
+    def _extract_termination_evidence_from_observation(
+        self,
+        observation: Dict[str, Any],
+    ) -> Tuple[List[str], List[str]]:
+        """Extract structured completion evidence and blockers from the current observation."""
+
+        satisfied: List[str] = []
+        missing: List[str] = []
+        modes = {
+            str(item).strip().lower()
+            for item in observation.get("modes", [])
+            if str(item).strip()
+        }
+        task_family = str(observation.get("task_family", "")).strip().lower()
+
+        def add_flag(
+            key: str,
+            label: str,
+            require: bool = True,
+        ) -> None:
+            if key not in observation and not require:
+                return
+            if bool(observation.get(key, False)):
+                satisfied.append(label)
+            else:
+                missing.append(label)
+
+        add_flag("completion_ready", "completion_ready", require=False)
+        add_flag("goal_ready", "goal_ready", require=False)
+        add_flag("evidence_ready", "evidence_ready", require=False)
+
+        if "dead_end_cleared" in observation and ("dead_end" in modes or "dead_end" in task_family):
+            add_flag("dead_end_cleared", "dead_end_cleared")
+        if "safe_review_complete" in observation and ("risk" in modes or "risk" in task_family or "unsafe" in task_family):
+            add_flag("safe_review_complete", "safe_review_complete")
+        if bool(observation.get("choice_required", False)):
+            missing.append("route_selection_pending")
+        if str(observation.get("selected_route", "")).strip():
+            satisfied.append("route_selected")
+
+        return satisfied, missing
+
+    def _collect_recent_failure_events(
+        self,
+        trajectory: List[Dict[str, Any]],
+        max_items: int = 3,
+    ) -> List[Dict[str, str]]:
+        """Collect recent blocked / failed / no-progress signals for routing decisions."""
+
+        step_events = [item for item in trajectory if isinstance(item, dict) and "step" in item]
+        recent_failures: List[Dict[str, str]] = []
+        seen_signatures: set[Tuple[str, str]] = set()
+
+        for event in reversed(step_events):
+            failure: Optional[Dict[str, str]] = None
             action_obj = event.get("action")
-            if not isinstance(action_obj, dict):
+            action_type = ""
+            action_target = ""
+            if isinstance(action_obj, dict):
+                action_type = str(action_obj.get("type", "")).strip().lower()
+                action_target = str(action_obj.get("target", "")).strip()
+
+            if bool(event.get("finish_rejected")):
+                finish_reason = str(event.get("finish_reject_reason", "")).strip() or "finish_rejected"
+                failure = {
+                    "kind": "finish_rejected",
+                    "reason": finish_reason,
+                    "text": f"Finish was rejected: {finish_reason}.",
+                }
+            else:
+                interceptor_result = event.get("interceptor_result")
+                if isinstance(interceptor_result, dict) and bool(interceptor_result.get("blocked", False)):
+                    block_reason = str(interceptor_result.get("block_reason", "")).strip() or "blocked_action"
+                    failure = {
+                        "kind": "blocked_action",
+                        "reason": block_reason,
+                        "text": f"Action {action_type or 'unknown'} {self._render_dead_end_target(action_target)} was blocked: {block_reason}.",
+                    }
+                else:
+                    observation = event.get("observation")
+                    if isinstance(observation, dict):
+                        env_error = str(observation.get("error", "")).strip()
+                        if env_error:
+                            failure = {
+                                "kind": "execution_error",
+                                "reason": env_error,
+                                "text": f"Action {action_type or 'unknown'} {self._render_dead_end_target(action_target)} errored: {env_error}.",
+                            }
+                    if failure is None and action_type in {"click", "press", "goto", "type", "fill"}:
+                        if not bool(event.get("state_changed", True)):
+                            failure = {
+                                "kind": "no_progress",
+                                "reason": "no_state_change",
+                                "text": f"Action {action_type} {self._render_dead_end_target(action_target)} made no state progress.",
+                            }
+
+            if failure is None:
                 continue
 
-            action_type = str(action_obj.get("type", "")).strip().lower()
-            if action_type in {"", "noop", "think", "finish"}:
+            signature = (failure["kind"], failure["reason"])
+            if signature in seen_signatures:
                 continue
-            return True, "has_meaningful_action_history"
+            seen_signatures.add(signature)
+            recent_failures.append(failure)
+            if len(recent_failures) >= max_items:
+                break
 
-        return False, "no_meaningful_action_history"
+        recent_failures.reverse()
+        return recent_failures
+
+    @staticmethod
+    def _compose_cannot_conclude_reason(
+        missing_evidence: List[str],
+        recent_failure_events: List[Dict[str, str]],
+    ) -> str:
+        """Explain why the task should not conclude yet."""
+
+        reason_parts: List[str] = []
+        if missing_evidence:
+            reason_parts.append(f"missing evidence: {', '.join(missing_evidence)}")
+        if recent_failure_events:
+            latest = recent_failure_events[-1]
+            latest_text = str(latest.get("text", "")).strip()
+            if latest_text:
+                reason_parts.append(f"latest blocker: {latest_text}")
+        if not reason_parts:
+            return "completion evidence is still insufficient"
+        return "; ".join(reason_parts)
+
+    @staticmethod
+    def _format_termination_routing_for_prompt(termination_routing: Dict[str, Any]) -> str:
+        """Serialize termination-routing evidence into a prompt slot."""
+
+        route = str(termination_routing.get("route", "CONTINUE")).strip().upper() or "CONTINUE"
+        satisfied = termination_routing.get("satisfied_evidence", [])
+        missing = termination_routing.get("missing_evidence", [])
+        recent_failures = termination_routing.get("recent_failure_events", [])
+        cannot_conclude_reason = str(termination_routing.get("cannot_conclude_reason", "")).strip() or "None"
+
+        def render_lines(title: str, items: Any) -> List[str]:
+            lines = [title]
+            if not isinstance(items, list) or not items:
+                lines.append("- None")
+                return lines
+            for item in items:
+                if isinstance(item, dict):
+                    lines.append(f"- {str(item.get('text', '')).strip() or json.dumps(item, ensure_ascii=True)}")
+                else:
+                    lines.append(f"- {str(item).strip()}")
+            return lines
+
+        route_guidance = {
+            "CONCLUDE": "Completion evidence is sufficient. Finish is allowed.",
+            "BLOCK": "A recent action was blocked or rejected. Do not conclude yet; choose a safer alternative.",
+            "REVISE": "The recent path did not make progress. Revise the plan before concluding.",
+            "CONTINUE": "Evidence is still incomplete. Continue gathering the required signals.",
+        }
+        lines = [
+            f"Recommended control route: {route}",
+            route_guidance.get(route, "Evidence is incomplete. Continue carefully."),
+            *render_lines("Satisfied evidence:", satisfied),
+            *render_lines("Missing evidence:", missing),
+            *render_lines("Recent failure / blocked events:", recent_failures),
+            f"Why you cannot conclude: {cannot_conclude_reason}",
+        ]
+        return "\n".join(lines)
 
     def _format_experience_as_nl(
         self,
@@ -1275,6 +1519,7 @@ class CERAgent:
         step: int,
         observation: Dict[str, Any],
         global_constraints: str,
+        termination_routing: Dict[str, Any],
         use_isolation: bool = True,
     ) -> str:
         """Build iterative prompt for action generation."""
@@ -1310,6 +1555,7 @@ class CERAgent:
         trajectory_text = json.dumps(prompt_action_history, ensure_ascii=True)
         global_state_text = self._build_global_state_for_prompt(composed_context)
         observation_block = self._format_observation_for_prompt(observation)
+        termination_routing_block = self._format_termination_routing_for_prompt(termination_routing)
         prompt_prefix = (
             f"Step: {step}\n\n"
             "<Critical_Task_Constraints>\n"
@@ -1356,10 +1602,20 @@ class CERAgent:
                 + "<Explored_Dead_Ends>\n"
                 + self._format_dead_ends_for_prompt(dead_end_lines)
                 + "\n</Explored_Dead_Ends>\n\n"
+                + "<Termination_Routing>\n"
+                + termination_routing_block
+                + "\n</Termination_Routing>\n\n"
                 + global_state_block
             )
 
-        return prompt_prefix + repeated_constraints_block + global_state_block
+        return (
+            prompt_prefix
+            + repeated_constraints_block
+            + "<Termination_Routing>\n"
+            + termination_routing_block
+            + "\n</Termination_Routing>\n\n"
+            + global_state_block
+        )
 
     def _format_observation_for_prompt(self, observation: Dict[str, Any] | str) -> str:
         """Format structured observation into a prompt-sized textual block."""
@@ -2057,6 +2313,7 @@ class CERAgent:
         observation: Dict[str, Any],
         trajectory: List[Dict[str, Any]],
         global_constraints: str,
+        termination_routing: Dict[str, Any],
         use_isolation: bool,
     ) -> Dict[str, Any]:
         """Capture prompt composition statistics for benchmark reports."""
@@ -2074,12 +2331,14 @@ class CERAgent:
             else []
         )
         observation_block = self._format_observation_for_prompt(observation)
+        termination_routing_block = self._format_termination_routing_for_prompt(termination_routing)
         return {
             "total_chars": len(prompt),
             "total_tokens_est": max(len(prompt) // 4, 1),
             "constraint_block_chars": len(global_constraints.strip()) if use_isolation else 0,
             "repeated_constraint_chars": len(global_constraints.strip()) if self.repeat_constraints_each_step else 0,
             "dead_end_block_chars": len("\n".join(dead_end_lines)),
+            "termination_block_chars": len(termination_routing_block),
             "history_block_chars": len(json.dumps(history_payload, ensure_ascii=True)),
             "observation_block_chars": len(observation_block),
             "history_mode": self.history_mode,
