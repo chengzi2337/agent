@@ -45,8 +45,12 @@ class BenchmarkSuiteTests(unittest.TestCase):
             self.assertIn("routing_diagnostics", payload)
             self.assertIn("safety_pipeline_summaries", payload)
             self.assertIn("safety_flow_summaries", payload)
+            self.assertIn("difficulty_stratified_summaries", payload)
+            self.assertIn("horizon_scaling_summaries", payload)
+            self.assertIn("risk_complexity_summaries", payload)
             self.assertIn("constraint_retention_rate", payload["summaries"][0])
             self.assertIn("proposal_rate_on_risk_tasks", payload["safety_pipeline_summaries"][0])
+            self.assertIn("difficulty_label", payload["difficulty_stratified_summaries"][0])
             config_names = {item["config_name"] for item in payload["summaries"]}
             self.assertIn("vanilla", config_names)
             self.assertIn("cer_full", config_names)
@@ -60,6 +64,9 @@ class BenchmarkSuiteTests(unittest.TestCase):
                 summary_md = file.read()
             self.assertIn("Table 6: Unsafe Proposal Pipeline", summary_md)
             self.assertIn("Table 7: Safety Flow", summary_md)
+            self.assertIn("Table 8: Difficulty Stratification", summary_md)
+            self.assertIn("Table 9: Horizon Scaling", summary_md)
+            self.assertIn("Table 10: Risk Complexity Stratification", summary_md)
         finally:
             if os.path.isdir(tmpdir):
                 shutil.rmtree(tmpdir, ignore_errors=True)

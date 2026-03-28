@@ -30,6 +30,10 @@ ABLATION_ORDER = [
     "cer_full",
 ]
 
+DIFFICULTY_ORDER = ["easy", "medium", "hard", "very_hard", "unspecified"]
+HORIZON_ORDER = ["short", "medium", "long", "very_long"]
+RISK_COMPLEXITY_ORDER = ["explicit", "contextual", "compositional", "none"]
+
 
 def write_report_bundle(
     output_dir: str,
@@ -55,6 +59,9 @@ def write_report_bundle(
     routing_diagnostics = build_routing_diagnostics(summaries)
     safety_pipeline_summaries = build_safety_pipeline_summaries(trials)
     safety_flow_summaries = build_safety_flow_summaries(trials)
+    difficulty_stratified_summaries = build_difficulty_stratified_summaries(trials)
+    horizon_scaling_summaries = build_horizon_scaling_summaries(trials)
+    risk_complexity_summaries = build_risk_complexity_summaries(trials)
 
     snapshot_dir = os.path.join(report_dir, "input_snapshots")
     task_snapshot_dir = os.path.join(snapshot_dir, "tasks")
@@ -96,6 +103,9 @@ def write_report_bundle(
         "routing_diagnostics": routing_diagnostics,
         "safety_pipeline_summaries": safety_pipeline_summaries,
         "safety_flow_summaries": safety_flow_summaries,
+        "difficulty_stratified_summaries": difficulty_stratified_summaries,
+        "horizon_scaling_summaries": horizon_scaling_summaries,
+        "risk_complexity_summaries": risk_complexity_summaries,
         "task_family_summaries": task_family_summaries,
         "ablation_summaries": ablation_summaries,
         "failure_taxonomy": failure_taxonomy,
@@ -113,6 +123,9 @@ def write_report_bundle(
                 routing_diagnostics=routing_diagnostics,
                 safety_pipeline_summaries=safety_pipeline_summaries,
                 safety_flow_summaries=safety_flow_summaries,
+                difficulty_stratified_summaries=difficulty_stratified_summaries,
+                horizon_scaling_summaries=horizon_scaling_summaries,
+                risk_complexity_summaries=risk_complexity_summaries,
                 task_family_summaries=task_family_summaries,
                 ablation_summaries=ablation_summaries,
                 failure_taxonomy=failure_taxonomy,
@@ -133,6 +146,9 @@ def render_summary_markdown(
     routing_diagnostics: List[Dict[str, Any]],
     safety_pipeline_summaries: List[Dict[str, Any]],
     safety_flow_summaries: List[Dict[str, Any]],
+    difficulty_stratified_summaries: List[Dict[str, Any]],
+    horizon_scaling_summaries: List[Dict[str, Any]],
+    risk_complexity_summaries: List[Dict[str, Any]],
     task_family_summaries: List[Dict[str, Any]],
     ablation_summaries: List[Dict[str, Any]],
     failure_taxonomy: List[Dict[str, Any]],
@@ -277,6 +293,58 @@ def render_summary_markdown(
             f"{item['unsafe_executed_count']} | {item['proposal_stalled_count']} |"
         )
 
+    lines.extend(
+        [
+            "",
+            "## Table 8: Difficulty Stratification",
+            "",
+            "| difficulty | config | runs | success | compliance | premature_finish | unsafe_execution | avg_tokens |",
+            "| --- | --- | --- | --- | --- | --- | --- | --- |",
+        ]
+    )
+    for item in difficulty_stratified_summaries:
+        lines.append(
+            f"| {item['difficulty_label']} | {item['config_name']} | {item['runs']} | {item['task_success_rate']:.2%} | "
+            f"{item['constraint_compliance_rate']:.2%} | {item['premature_finish_rate']:.2%} | "
+            f"{item['unsafe_action_execution_rate']:.2%} | {item['avg_total_tokens']:.1f} |"
+        )
+
+    lines.extend(
+        [
+            "",
+            "## Table 9: Horizon Scaling",
+            "",
+            "Buckets: `short <= 8`, `medium 9-12`, `long 13-16`, `very_long > 16`.",
+            "",
+            "| horizon | config | runs | success | compliance | premature_finish | unsafe_execution | avg_tokens |",
+            "| --- | --- | --- | --- | --- | --- | --- | --- |",
+        ]
+    )
+    for item in horizon_scaling_summaries:
+        lines.append(
+            f"| {item['horizon_bucket']} | {item['config_name']} | {item['runs']} | {item['task_success_rate']:.2%} | "
+            f"{item['constraint_compliance_rate']:.2%} | {item['premature_finish_rate']:.2%} | "
+            f"{item['unsafe_action_execution_rate']:.2%} | {item['avg_total_tokens']:.1f} |"
+        )
+
+    lines.extend(
+        [
+            "",
+            "## Table 10: Risk Complexity Stratification",
+            "",
+            "Risk complexity buckets: `explicit` = pure risk, `contextual` = risk conditioned on retained constraints, `compositional` = risk combined with additional control failures.",
+            "",
+            "| risk_complexity | config | runs | success | proposal_rate | blocked_rate | execution_rate | post_block_success |",
+            "| --- | --- | --- | --- | --- | --- | --- | --- |",
+        ]
+    )
+    for item in risk_complexity_summaries:
+        lines.append(
+            f"| {item['risk_complexity']} | {item['config_name']} | {item['risk_task_runs']} | {item['task_success_rate']:.2%} | "
+            f"{item['proposal_rate_on_risk_tasks']:.2%} | {item['blocked_proposal_rate_on_risk_tasks']:.2%} | "
+            f"{item['execution_rate_on_risk_tasks']:.2%} | {item['post_block_success_rate']:.2%} |"
+        )
+
     lines.append("")
     return "\n".join(lines)
 
@@ -358,6 +426,71 @@ def build_safety_flow_summaries(trials: List[TrialEvaluation]) -> List[Dict[str,
                 "blocked_and_failed_count": sum(1 for trial in risk_trials if _categorize_safety_flow(trial) == "blocked_and_failed"),
                 "unsafe_executed_count": sum(1 for trial in risk_trials if _categorize_safety_flow(trial) == "unsafe_executed"),
                 "proposal_stalled_count": sum(1 for trial in risk_trials if _categorize_safety_flow(trial) == "proposal_stalled"),
+            }
+        )
+    return rows
+
+
+def build_difficulty_stratified_summaries(trials: List[TrialEvaluation]) -> List[Dict[str, Any]]:
+    grouped: Dict[Tuple[str, str], List[TrialEvaluation]] = {}
+    for trial in trials:
+        key = (trial["difficulty_label"], trial["config_name"])
+        grouped.setdefault(key, []).append(trial)
+
+    rows: List[Dict[str, Any]] = []
+    for difficulty_label, config_name in sorted(
+        grouped, key=lambda key: (_order_key(key[0], DIFFICULTY_ORDER), _config_order_key(key[1]))
+    ):
+        summary = _aggregate_trials(grouped[(difficulty_label, config_name)])
+        summary["difficulty_label"] = difficulty_label
+        summary["config_name"] = config_name
+        summary["runs"] = len(grouped[(difficulty_label, config_name)])
+        rows.append(summary)
+    return rows
+
+
+def build_horizon_scaling_summaries(trials: List[TrialEvaluation]) -> List[Dict[str, Any]]:
+    grouped: Dict[Tuple[str, str], List[TrialEvaluation]] = {}
+    for trial in trials:
+        key = (trial["horizon_bucket"], trial["config_name"])
+        grouped.setdefault(key, []).append(trial)
+
+    rows: List[Dict[str, Any]] = []
+    for horizon_bucket, config_name in sorted(
+        grouped, key=lambda key: (_order_key(key[0], HORIZON_ORDER), _config_order_key(key[1]))
+    ):
+        summary = _aggregate_trials(grouped[(horizon_bucket, config_name)])
+        summary["horizon_bucket"] = horizon_bucket
+        summary["config_name"] = config_name
+        summary["runs"] = len(grouped[(horizon_bucket, config_name)])
+        rows.append(summary)
+    return rows
+
+
+def build_risk_complexity_summaries(trials: List[TrialEvaluation]) -> List[Dict[str, Any]]:
+    grouped: Dict[Tuple[str, str], List[TrialEvaluation]] = {}
+    for trial in trials:
+        if trial["risk_complexity"] == "none":
+            continue
+        key = (trial["risk_complexity"], trial["config_name"])
+        grouped.setdefault(key, []).append(trial)
+
+    rows: List[Dict[str, Any]] = []
+    for risk_complexity, config_name in sorted(
+        grouped, key=lambda key: (_order_key(key[0], RISK_COMPLEXITY_ORDER), _config_order_key(key[1]))
+    ):
+        items = grouped[(risk_complexity, config_name)]
+        blocked_trials = [trial for trial in items if int(trial["blocked_unsafe_proposal_count"]) > 0]
+        rows.append(
+            {
+                "risk_complexity": risk_complexity,
+                "config_name": config_name,
+                "risk_task_runs": len(items),
+                "task_success_rate": _rate(items, "success"),
+                "proposal_rate_on_risk_tasks": _rate(items, "unsafe_action_proposed"),
+                "blocked_proposal_rate_on_risk_tasks": len(blocked_trials) / len(items) if items else 0.0,
+                "execution_rate_on_risk_tasks": _rate(items, "unsafe_action_executed"),
+                "post_block_success_rate": _rate(blocked_trials, "success"),
             }
         )
     return rows
@@ -466,6 +599,18 @@ def _categorize_safety_flow(trial: TrialEvaluation) -> str:
     if int(trial["blocked_unsafe_proposal_count"]) > 0:
         return "blocked_and_recovered" if trial["success"] else "blocked_and_failed"
     return "proposal_stalled"
+
+
+def _config_order_key(config_name: str) -> Tuple[int, Any]:
+    if config_name in ABLATION_ORDER:
+        return (0, ABLATION_ORDER.index(config_name))
+    return (1, config_name)
+
+
+def _order_key(value: str, order: List[str]) -> Tuple[int, Any]:
+    if value in order:
+        return (0, order.index(value))
+    return (1, value)
 
 
 def _copy_snapshot_files(source_dir: str, destination_dir: str) -> None:

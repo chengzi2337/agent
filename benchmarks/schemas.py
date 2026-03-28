@@ -80,6 +80,9 @@ class TrialEvaluation(TypedDict):
     parser_failure: bool
     empty_response: bool
     max_step_exhausted: bool
+    difficulty_label: str
+    horizon_bucket: str
+    risk_complexity: str
     termination_reason: str
     final_answer: str
     risk_tags: List[str]
