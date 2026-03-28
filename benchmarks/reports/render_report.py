@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import json
 import os
@@ -32,6 +32,8 @@ def write_report_bundle(
     task_family_summaries = build_task_family_summaries(trials)
     ablation_summaries = build_ablation_summaries(trials)
     failure_taxonomy = build_failure_taxonomy(trials)
+    capability_summaries = build_capability_summaries(summaries)
+    routing_diagnostics = build_routing_diagnostics(summaries)
 
     snapshot_dir = os.path.join(report_dir, "input_snapshots")
     task_snapshot_dir = os.path.join(snapshot_dir, "tasks")
@@ -69,6 +71,8 @@ def write_report_bundle(
         "metadata": metadata,
         "artifact_paths": artifact_paths,
         "summaries": summaries,
+        "capability_summaries": capability_summaries,
+        "routing_diagnostics": routing_diagnostics,
         "task_family_summaries": task_family_summaries,
         "ablation_summaries": ablation_summaries,
         "failure_taxonomy": failure_taxonomy,
@@ -82,6 +86,8 @@ def write_report_bundle(
             render_summary_markdown(
                 metadata=metadata,
                 summaries=summaries,
+                capability_summaries=capability_summaries,
+                routing_diagnostics=routing_diagnostics,
                 task_family_summaries=task_family_summaries,
                 ablation_summaries=ablation_summaries,
                 failure_taxonomy=failure_taxonomy,
@@ -98,6 +104,8 @@ def write_report_bundle(
 def render_summary_markdown(
     metadata: Dict[str, Any],
     summaries: List[ConfigSummary],
+    capability_summaries: List[Dict[str, Any]],
+    routing_diagnostics: List[Dict[str, Any]],
     task_family_summaries: List[Dict[str, Any]],
     ablation_summaries: List[Dict[str, Any]],
     failure_taxonomy: List[Dict[str, Any]],
@@ -131,7 +139,23 @@ def render_summary_markdown(
     lines.extend(
         [
             "",
-            "## Table 1: Main Results",
+            "## Table 1: Capability Taxonomy",
+            "",
+            "| config | constraint_retention | strategic_control | recovery_ability | safe_execution | proposal_risk | blocked_proposal_recovery |",
+            "| --- | --- | --- | --- | --- | --- | --- |",
+        ]
+    )
+    for item in capability_summaries:
+        lines.append(
+            f"| {item['config_name']} | {item['constraint_retention_rate']:.2%} | {item['strategic_control_rate']:.2%} | "
+            f"{item['recovery_ability_rate']:.2%} | {item['safe_execution_rate']:.2%} | "
+            f"{item['unsafe_action_proposal_rate']:.2%} | {item['blocked_proposal_recovery_rate']:.2%} |"
+        )
+
+    lines.extend(
+        [
+            "",
+            "## Table 2: Main Results",
             "",
             "| task_family | config | success | compliance | premature_finish | dead_end_repeat | unsafe_execution | avg_tokens |",
             "| --- | --- | --- | --- | --- | --- | --- | --- |",
@@ -148,7 +172,7 @@ def render_summary_markdown(
     lines.extend(
         [
             "",
-            "## Table 2: Ablation",
+            "## Table 3: Ablation",
             "",
             "| config | success | compliance | premature_finish | dead_end_repeat | unsafe_execution | avg_tokens | finish_gate_blocks | interceptor_blocks |",
             "| --- | --- | --- | --- | --- | --- | --- | --- | --- |",
@@ -165,7 +189,7 @@ def render_summary_markdown(
     lines.extend(
         [
             "",
-            "## Table 3: Failure Taxonomy",
+            "## Table 4: Failure Taxonomy",
             "",
             "| config | total_failures | constraint_violation | premature_finish | repeated_dead_end | unsafe_execution | other |",
             "| --- | --- | --- | --- | --- | --- | --- |",
@@ -177,8 +201,55 @@ def render_summary_markdown(
             f"{item['premature_finish']} | {item['repeated_dead_end']} | {item['unsafe_execution']} | {item['other']} |"
         )
 
+    lines.extend(
+        [
+            "",
+            "## Table 5: Recovery and Routing Diagnostics",
+            "",
+            "| config | finish_precision | finish_recall | blocked_finish_recovery | proposal_to_execution | avg_post_block_steps | avg_post_block_tokens | avg_post_block_latency |",
+            "| --- | --- | --- | --- | --- | --- | --- | --- |",
+        ]
+    )
+    for item in routing_diagnostics:
+        lines.append(
+            f"| {item['config_name']} | {item['finish_precision']:.2%} | {item['finish_recall']:.2%} | "
+            f"{item['blocked_finish_recovery_rate']:.2%} | {item['proposal_to_execution_conversion_rate']:.2%} | "
+            f"{item['avg_post_block_extra_steps']:.2f} | {item['avg_post_block_extra_tokens']:.1f} | {item['avg_post_block_extra_latency']:.2f} |"
+        )
+
     lines.append("")
     return "\n".join(lines)
+
+
+def build_capability_summaries(summaries: List[ConfigSummary]) -> List[Dict[str, Any]]:
+    return [
+        {
+            "config_name": item["config_name"],
+            "constraint_retention_rate": item["constraint_retention_rate"],
+            "strategic_control_rate": item["strategic_control_rate"],
+            "recovery_ability_rate": item["recovery_ability_rate"],
+            "safe_execution_rate": item["safe_execution_rate"],
+            "unsafe_action_proposal_rate": item["unsafe_action_proposal_rate"],
+            "blocked_proposal_recovery_rate": item["blocked_proposal_recovery_rate"],
+        }
+        for item in summaries
+    ]
+
+
+def build_routing_diagnostics(summaries: List[ConfigSummary]) -> List[Dict[str, Any]]:
+    return [
+        {
+            "config_name": item["config_name"],
+            "finish_precision": item["finish_precision"],
+            "finish_recall": item["finish_recall"],
+            "blocked_finish_recovery_rate": item["blocked_finish_recovery_rate"],
+            "proposal_to_execution_conversion_rate": item["proposal_to_execution_conversion_rate"],
+            "avg_post_block_extra_steps": item["avg_post_block_extra_steps"],
+            "avg_post_block_extra_tokens": item["avg_post_block_extra_tokens"],
+            "avg_post_block_extra_latency": item["avg_post_block_extra_latency"],
+        }
+        for item in summaries
+    ]
 
 
 def build_task_family_summaries(trials: List[TrialEvaluation]) -> List[Dict[str, Any]]:
@@ -259,6 +330,7 @@ def _rate(trials: List[TrialEvaluation], key: str) -> float:
     if not trials:
         return 0.0
     return sum(1 for trial in trials if bool(trial[key])) / len(trials)
+
 
 def _copy_snapshot_files(source_dir: str, destination_dir: str) -> None:
     if os.path.isdir(destination_dir):

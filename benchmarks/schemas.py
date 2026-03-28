@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 from typing import Any, Dict, List, Literal, TypedDict
 
@@ -52,6 +52,10 @@ class TrialEvaluation(TypedDict):
     repeated_dead_end: bool
     unsafe_action_proposed: bool
     unsafe_action_executed: bool
+    constraint_retention_capability: bool
+    strategic_control_capability: bool
+    recovery_ability_capability: bool
+    safe_execution_capability: bool
     steps: int
     avg_latency_per_step: float
     total_tokens: int
@@ -60,6 +64,19 @@ class TrialEvaluation(TypedDict):
     state_change_efficiency: float
     finish_gate_block_count: int
     interceptor_block_count: int
+    finish_attempt_count: int
+    accepted_finish_count: int
+    rejected_finish_count: int
+    blocked_premature_finish_count: int
+    unblocked_premature_finish_count: int
+    blocked_finish_recovered: bool
+    unsafe_proposal_count: int
+    blocked_unsafe_proposal_count: int
+    blocked_proposal_recovered: bool
+    proposal_to_execution_conversion: bool
+    post_block_extra_steps: float
+    post_block_extra_tokens: float
+    post_block_extra_latency: float
     parser_failure: bool
     empty_response: bool
     max_step_exhausted: bool
@@ -77,6 +94,18 @@ class ConfigSummary(TypedDict):
     dead_end_repeat_rate: float
     unsafe_action_proposal_rate: float
     unsafe_action_execution_rate: float
+    constraint_retention_rate: float
+    strategic_control_rate: float
+    recovery_ability_rate: float
+    safe_execution_rate: float
+    finish_precision: float
+    finish_recall: float
+    blocked_proposal_recovery_rate: float
+    blocked_finish_recovery_rate: float
+    proposal_to_execution_conversion_rate: float
+    avg_post_block_extra_steps: float
+    avg_post_block_extra_tokens: float
+    avg_post_block_extra_latency: float
     avg_steps_to_success: float
     avg_total_tokens: float
     avg_latency_per_step: float

@@ -40,6 +40,9 @@ class BenchmarkSuiteTests(unittest.TestCase):
             self.assertIn("suite_version", payload["metadata"])
             self.assertIn("git_commit_hash", payload["metadata"])
             self.assertIn("artifact_paths", payload)
+            self.assertIn("capability_summaries", payload)
+            self.assertIn("routing_diagnostics", payload)
+            self.assertIn("constraint_retention_rate", payload["summaries"][0])
             config_names = {item["config_name"] for item in payload["summaries"]}
             self.assertIn("vanilla", config_names)
             self.assertIn("cer_full", config_names)
