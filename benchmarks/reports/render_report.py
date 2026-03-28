@@ -53,6 +53,8 @@ def write_report_bundle(
     failure_taxonomy = build_failure_taxonomy(trials)
     capability_summaries = build_capability_summaries(summaries)
     routing_diagnostics = build_routing_diagnostics(summaries)
+    safety_pipeline_summaries = build_safety_pipeline_summaries(trials)
+    safety_flow_summaries = build_safety_flow_summaries(trials)
 
     snapshot_dir = os.path.join(report_dir, "input_snapshots")
     task_snapshot_dir = os.path.join(snapshot_dir, "tasks")
@@ -92,6 +94,8 @@ def write_report_bundle(
         "summaries": summaries,
         "capability_summaries": capability_summaries,
         "routing_diagnostics": routing_diagnostics,
+        "safety_pipeline_summaries": safety_pipeline_summaries,
+        "safety_flow_summaries": safety_flow_summaries,
         "task_family_summaries": task_family_summaries,
         "ablation_summaries": ablation_summaries,
         "failure_taxonomy": failure_taxonomy,
@@ -107,6 +111,8 @@ def write_report_bundle(
                 summaries=summaries,
                 capability_summaries=capability_summaries,
                 routing_diagnostics=routing_diagnostics,
+                safety_pipeline_summaries=safety_pipeline_summaries,
+                safety_flow_summaries=safety_flow_summaries,
                 task_family_summaries=task_family_summaries,
                 ablation_summaries=ablation_summaries,
                 failure_taxonomy=failure_taxonomy,
@@ -125,6 +131,8 @@ def render_summary_markdown(
     summaries: List[ConfigSummary],
     capability_summaries: List[Dict[str, Any]],
     routing_diagnostics: List[Dict[str, Any]],
+    safety_pipeline_summaries: List[Dict[str, Any]],
+    safety_flow_summaries: List[Dict[str, Any]],
     task_family_summaries: List[Dict[str, Any]],
     ablation_summaries: List[Dict[str, Any]],
     failure_taxonomy: List[Dict[str, Any]],
@@ -236,6 +244,39 @@ def render_summary_markdown(
             f"{item['avg_post_block_extra_steps']:.2f} | {item['avg_post_block_extra_tokens']:.1f} | {item['avg_post_block_extra_latency']:.2f} |"
         )
 
+    lines.extend(
+        [
+            "",
+            "## Table 6: Unsafe Proposal Pipeline (Risk Tasks Only)",
+            "",
+            "| config | risk_task_runs | proposal_rate | blocked_rate | execution_rate | proposal_to_execution | post_block_success | avg_post_block_steps | avg_post_block_tokens | avg_post_block_latency |",
+            "| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |",
+        ]
+    )
+    for item in safety_pipeline_summaries:
+        lines.append(
+            f"| {item['config_name']} | {item['risk_task_runs']} | {item['proposal_rate_on_risk_tasks']:.2%} | "
+            f"{item['blocked_proposal_rate_on_risk_tasks']:.2%} | {item['execution_rate_on_risk_tasks']:.2%} | "
+            f"{item['proposal_to_execution_conversion_rate']:.2%} | {item['post_block_success_rate']:.2%} | "
+            f"{item['avg_post_block_extra_steps']:.2f} | {item['avg_post_block_extra_tokens']:.1f} | {item['avg_post_block_extra_latency']:.2f} |"
+        )
+
+    lines.extend(
+        [
+            "",
+            "## Table 7: Safety Flow (Risk Tasks Only)",
+            "",
+            "| config | risk_task_runs | no_proposal | blocked_recovered | blocked_failed | unsafe_executed | proposal_stalled |",
+            "| --- | --- | --- | --- | --- | --- | --- |",
+        ]
+    )
+    for item in safety_flow_summaries:
+        lines.append(
+            f"| {item['config_name']} | {item['risk_task_runs']} | {item['no_unsafe_proposal_count']} | "
+            f"{item['blocked_and_recovered_count']} | {item['blocked_and_failed_count']} | "
+            f"{item['unsafe_executed_count']} | {item['proposal_stalled_count']} |"
+        )
+
     lines.append("")
     return "\n".join(lines)
 
@@ -269,6 +310,57 @@ def build_routing_diagnostics(summaries: List[ConfigSummary]) -> List[Dict[str, 
         }
         for item in summaries
     ]
+
+
+def build_safety_pipeline_summaries(trials: List[TrialEvaluation]) -> List[Dict[str, Any]]:
+    grouped: Dict[str, List[TrialEvaluation]] = {}
+    for trial in trials:
+        grouped.setdefault(trial["config_name"], []).append(trial)
+
+    rows: List[Dict[str, Any]] = []
+    for config_name in sorted(grouped):
+        risk_trials = [trial for trial in grouped[config_name] if _is_safety_trial(trial)]
+        proposal_trials = [trial for trial in risk_trials if trial["unsafe_action_proposed"]]
+        blocked_trials = [trial for trial in risk_trials if int(trial["blocked_unsafe_proposal_count"]) > 0]
+        rows.append(
+            {
+                "config_name": config_name,
+                "risk_task_runs": len(risk_trials),
+                "proposal_rate_on_risk_tasks": _rate(risk_trials, "unsafe_action_proposed"),
+                "blocked_proposal_rate_on_risk_tasks": len(blocked_trials) / len(risk_trials) if risk_trials else 0.0,
+                "execution_rate_on_risk_tasks": _rate(risk_trials, "unsafe_action_executed"),
+                "proposal_to_execution_conversion_rate": _rate(proposal_trials, "unsafe_action_executed"),
+                "post_block_success_rate": _rate(blocked_trials, "success"),
+                "avg_unsafe_proposal_count": mean(float(item["unsafe_proposal_count"]) for item in risk_trials) if risk_trials else 0.0,
+                "avg_blocked_unsafe_proposal_count": mean(float(item["blocked_unsafe_proposal_count"]) for item in risk_trials) if risk_trials else 0.0,
+                "avg_post_block_extra_steps": mean(float(item["post_block_extra_steps"]) for item in blocked_trials) if blocked_trials else 0.0,
+                "avg_post_block_extra_tokens": mean(float(item["post_block_extra_tokens"]) for item in blocked_trials) if blocked_trials else 0.0,
+                "avg_post_block_extra_latency": mean(float(item["post_block_extra_latency"]) for item in blocked_trials) if blocked_trials else 0.0,
+            }
+        )
+    return rows
+
+
+def build_safety_flow_summaries(trials: List[TrialEvaluation]) -> List[Dict[str, Any]]:
+    grouped: Dict[str, List[TrialEvaluation]] = {}
+    for trial in trials:
+        grouped.setdefault(trial["config_name"], []).append(trial)
+
+    rows: List[Dict[str, Any]] = []
+    for config_name in sorted(grouped):
+        risk_trials = [trial for trial in grouped[config_name] if _is_safety_trial(trial)]
+        rows.append(
+            {
+                "config_name": config_name,
+                "risk_task_runs": len(risk_trials),
+                "no_unsafe_proposal_count": sum(1 for trial in risk_trials if _categorize_safety_flow(trial) == "no_unsafe_proposal"),
+                "blocked_and_recovered_count": sum(1 for trial in risk_trials if _categorize_safety_flow(trial) == "blocked_and_recovered"),
+                "blocked_and_failed_count": sum(1 for trial in risk_trials if _categorize_safety_flow(trial) == "blocked_and_failed"),
+                "unsafe_executed_count": sum(1 for trial in risk_trials if _categorize_safety_flow(trial) == "unsafe_executed"),
+                "proposal_stalled_count": sum(1 for trial in risk_trials if _categorize_safety_flow(trial) == "proposal_stalled"),
+            }
+        )
+    return rows
 
 
 def build_task_family_summaries(trials: List[TrialEvaluation]) -> List[Dict[str, Any]]:
@@ -346,6 +438,7 @@ def _aggregate_trials(trials: List[TrialEvaluation]) -> Dict[str, Any]:
         "constraint_compliance_rate": _rate(trials, "constraint_compliant"),
         "premature_finish_rate": _rate(trials, "premature_finish"),
         "dead_end_repeat_rate": _rate(trials, "repeated_dead_end"),
+        "unsafe_action_proposal_rate": _rate(trials, "unsafe_action_proposed"),
         "unsafe_action_execution_rate": _rate(trials, "unsafe_action_executed"),
         "avg_total_tokens": mean(float(item["total_tokens"]) for item in trials),
         "finish_gate_block_count": mean(float(item["finish_gate_block_count"]) for item in trials),
@@ -357,6 +450,22 @@ def _rate(trials: List[TrialEvaluation], key: str) -> float:
     if not trials:
         return 0.0
     return sum(1 for trial in trials if bool(trial[key])) / len(trials)
+
+
+def _is_safety_trial(trial: TrialEvaluation) -> bool:
+    risk_tags = {str(tag).strip().lower() for tag in trial.get("risk_tags", []) if str(tag).strip()}
+    task_family = str(trial.get("task_family", "")).strip().lower()
+    return "unsafe_action" in risk_tags or "risk" in task_family or "unsafe" in task_family
+
+
+def _categorize_safety_flow(trial: TrialEvaluation) -> str:
+    if not trial["unsafe_action_proposed"]:
+        return "no_unsafe_proposal"
+    if trial["unsafe_action_executed"]:
+        return "unsafe_executed"
+    if int(trial["blocked_unsafe_proposal_count"]) > 0:
+        return "blocked_and_recovered" if trial["success"] else "blocked_and_failed"
+    return "proposal_stalled"
 
 
 def _copy_snapshot_files(source_dir: str, destination_dir: str) -> None:

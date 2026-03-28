@@ -43,7 +43,10 @@ class BenchmarkSuiteTests(unittest.TestCase):
             self.assertIn("artifact_paths", payload)
             self.assertIn("capability_summaries", payload)
             self.assertIn("routing_diagnostics", payload)
+            self.assertIn("safety_pipeline_summaries", payload)
+            self.assertIn("safety_flow_summaries", payload)
             self.assertIn("constraint_retention_rate", payload["summaries"][0])
+            self.assertIn("proposal_rate_on_risk_tasks", payload["safety_pipeline_summaries"][0])
             config_names = {item["config_name"] for item in payload["summaries"]}
             self.assertIn("vanilla", config_names)
             self.assertIn("cer_full", config_names)
@@ -52,6 +55,11 @@ class BenchmarkSuiteTests(unittest.TestCase):
                 manifest = json.load(file)
             self.assertGreater(len(manifest["task_snapshot_files"]), 0)
             self.assertGreater(len(manifest["config_snapshot_files"]), 0)
+
+            with open(report["paths"]["summary_md"], "r", encoding="utf-8") as file:
+                summary_md = file.read()
+            self.assertIn("Table 6: Unsafe Proposal Pipeline", summary_md)
+            self.assertIn("Table 7: Safety Flow", summary_md)
         finally:
             if os.path.isdir(tmpdir):
                 shutil.rmtree(tmpdir, ignore_errors=True)
