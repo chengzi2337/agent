@@ -3,7 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 from pathlib import Path
-from typing import Any, Dict
+from typing import Any, Dict, List
 
 from playwright_environment import PlaywrightEnvironment
 
@@ -109,6 +109,7 @@ class BenchmarkPlaywrightEnvironment(PlaywrightEnvironment):
             page = self._ensure_page()
             state = self._read_fixture_state(page)
             a11y_nodes = self._collect_a11y_nodes(page, max_items=max_items)
+            a11y_nodes.extend(self._build_completion_evidence_nodes(state))
             url = str(page.url)
             title = str(page.title())
         except Exception as exc:
@@ -126,6 +127,12 @@ class BenchmarkPlaywrightEnvironment(PlaywrightEnvironment):
             }
 
         observation_text = str(state.get("observation_text", "")).strip()
+        derived_observation_text = self._build_task_observation_text(url, title, state)
+        if derived_observation_text:
+            if observation_text:
+                observation_text = f"{observation_text}\n{derived_observation_text}"
+            else:
+                observation_text = derived_observation_text
         if not observation_text:
             observation_text = str(self._last_observation_text).strip()
         if not observation_text:
@@ -179,6 +186,9 @@ class BenchmarkPlaywrightEnvironment(PlaywrightEnvironment):
             labels["selected_route"] = selected_route
         if "constraint_compliant" in state:
             labels["constraint_compliant"] = bool(state.get("constraint_compliant"))
+        for flag in ("completion_ready", "goal_ready", "evidence_ready"):
+            if flag in state:
+                labels[flag] = bool(state.get(flag))
         return labels
 
     def _resolve_start_url(self, start_state: Dict[str, Any]) -> str:
@@ -210,7 +220,13 @@ class BenchmarkPlaywrightEnvironment(PlaywrightEnvironment):
                 }
                 """
             )
-            return state if isinstance(state, dict) else {}
+            merged_state = state if isinstance(state, dict) else {}
+            task_state = self._build_dynamic_task_state(current_page)
+            if task_state:
+                combined = dict(merged_state)
+                combined.update(task_state)
+                return combined
+            return merged_state
         except Exception:
             return {}
 
@@ -228,3 +244,242 @@ class BenchmarkPlaywrightEnvironment(PlaywrightEnvironment):
         risky_keywords = state.get("risky_keywords", self.task_spec.get("parameters", {}).get("risky_keywords", []))
         self.runtime_labels["risky_targets"] = list(risky_targets) if isinstance(risky_targets, list) else []
         self.runtime_labels["risky_keywords"] = list(risky_keywords) if isinstance(risky_keywords, list) else []
+
+    def _build_dynamic_task_state(self, page: Any) -> Dict[str, Any]:
+        parameters = self.task_spec.get("parameters", {})
+        if not isinstance(parameters, dict):
+            return {}
+
+        checks = parameters.get("completion_checks", [])
+        has_checks = isinstance(checks, list) and bool(checks)
+        risky_targets = parameters.get("risky_targets", [])
+        risky_keywords = parameters.get("risky_keywords", parameters.get("high_risk_keywords", []))
+        selected_route = self._resolve_selected_route(page, parameters)
+
+        state: Dict[str, Any] = {}
+        if has_checks:
+            snapshot = self._capture_completion_snapshot(page, checks)
+            completion_state = self.evaluate_completion_checks(
+                snapshot=snapshot,
+                checks=checks,
+                completion_mode=str(parameters.get("completion_mode", "all")),
+            )
+            state.update(completion_state)
+
+        if selected_route:
+            state["selected_route"] = selected_route
+        if isinstance(risky_targets, list) and risky_targets:
+            state["risky_targets"] = [str(item).strip() for item in risky_targets if str(item).strip()]
+        if isinstance(risky_keywords, list) and risky_keywords:
+            state["risky_keywords"] = [str(item).strip() for item in risky_keywords if str(item).strip()]
+        return state
+
+    def _resolve_selected_route(self, page: Any, parameters: Dict[str, Any]) -> str:
+        route_checks = parameters.get("route_checks", [])
+        if not isinstance(route_checks, list):
+            return ""
+
+        snapshot = self._capture_completion_snapshot(page, route_checks)
+        results = self.evaluate_completion_checks(snapshot=snapshot, checks=route_checks, completion_mode="any")
+        for item in results.get("completion_checks", []):
+            if isinstance(item, dict) and bool(item.get("passed", False)):
+                return str(item.get("route", item.get("name", ""))).strip()
+        return ""
+
+    def _capture_completion_snapshot(self, page: Any, checks: List[Dict[str, Any]]) -> Dict[str, Any]:
+        selectors: List[str] = []
+        seen: set[str] = set()
+        for item in checks:
+            if not isinstance(item, dict):
+                continue
+            selector = str(item.get("selector", "")).strip()
+            if not selector or selector in seen:
+                continue
+            seen.add(selector)
+            selectors.append(selector)
+
+        try:
+            snapshot = page.evaluate(
+                """
+                (selectors) => {
+                  const normalizeText = (value) => String(value || '').replace(/\\s+/g, ' ').trim();
+                  const selectorStates = {};
+                  for (const selector of selectors || []) {
+                    try {
+                      const node = document.querySelector(selector);
+                      selectorStates[selector] = {
+                        exists: Boolean(node),
+                        text: node ? normalizeText(node.innerText || node.textContent || '') : '',
+                        value: node ? normalizeText(node.value || '') : ''
+                      };
+                    } catch (_) {
+                      selectorStates[selector] = {
+                        exists: false,
+                        text: '',
+                        value: ''
+                      };
+                    }
+                  }
+                  return {
+                    url: String(window.location.href || ''),
+                    title: String(document.title || ''),
+                    body_text: normalizeText(document.body ? (document.body.innerText || document.body.textContent || '') : ''),
+                    selectors: selectorStates
+                  };
+                }
+                """,
+                selectors,
+            )
+            return snapshot if isinstance(snapshot, dict) else {}
+        except Exception:
+            return {}
+
+    def _build_task_observation_text(self, url: str, title: str, state: Dict[str, Any]) -> str:
+        lines: List[str] = []
+        if title:
+            lines.append(f"Page title: {title}")
+        if url:
+            lines.append(f"Current URL: {url}")
+
+        completion_checks = state.get("completion_checks", [])
+        if isinstance(completion_checks, list):
+            for item in completion_checks[:4]:
+                if not isinstance(item, dict):
+                    continue
+                name = str(item.get("name", "check")).strip() or "check"
+                expected = str(item.get("expected", "")).strip()
+                actual = str(item.get("actual", "")).strip()
+                if bool(item.get("passed", False)):
+                    detail = actual or expected or "matched"
+                    lines.append(f"Completion evidence ready: {name} -> {detail}")
+                elif expected:
+                    if actual:
+                        lines.append(f"Completion evidence pending: {name} expected '{expected}' but currently shows '{actual}'")
+                    else:
+                        lines.append(f"Completion evidence pending: {name} expects '{expected}'")
+
+        if not lines:
+            return ""
+        return "\n".join(lines)
+
+    def _build_completion_evidence_nodes(self, state: Dict[str, Any]) -> List[Dict[str, Any]]:
+        nodes: List[Dict[str, Any]] = []
+        completion_checks = state.get("completion_checks", [])
+        if not isinstance(completion_checks, list):
+            return nodes
+
+        for index, item in enumerate(completion_checks[:4], start=1):
+            if not isinstance(item, dict):
+                continue
+            name = str(item.get("name", "check")).strip() or "check"
+            expected = str(item.get("expected", "")).strip()
+            actual = str(item.get("actual", "")).strip()
+            selector = str(item.get("selector", "")).strip()
+            if bool(item.get("passed", False)):
+                detail = actual or expected or "matched"
+                text = f"Evidence {name}: {detail}"
+            elif expected:
+                detail = actual or "pending"
+                text = f"Pending {name}: expected {expected}; current {detail}"
+            else:
+                continue
+            nodes.append(
+                {
+                    "id": f"e{index}",
+                    "role": "status",
+                    "text": text,
+                    "selector": selector,
+                }
+            )
+        return nodes
+
+    @staticmethod
+    def _normalize_completion_text(value: Any) -> str:
+        return " ".join(str(value or "").strip().split()).lower()
+
+    @classmethod
+    def evaluate_completion_checks(
+        cls,
+        snapshot: Dict[str, Any],
+        checks: List[Dict[str, Any]],
+        completion_mode: str = "all",
+    ) -> Dict[str, Any]:
+        url = cls._normalize_completion_text(snapshot.get("url", ""))
+        title = cls._normalize_completion_text(snapshot.get("title", ""))
+        body_text = cls._normalize_completion_text(snapshot.get("body_text", ""))
+        selector_states = snapshot.get("selectors", {})
+        if not isinstance(selector_states, dict):
+            selector_states = {}
+
+        results: List[Dict[str, Any]] = []
+        for index, raw in enumerate(checks):
+            if not isinstance(raw, dict):
+                continue
+            check_type = str(raw.get("type", "")).strip().lower()
+            selector = str(raw.get("selector", "")).strip()
+            expected = str(raw.get("value", raw.get("text", ""))).strip()
+            expected_norm = cls._normalize_completion_text(expected)
+            selector_state = selector_states.get(selector, {}) if selector else {}
+            if not isinstance(selector_state, dict):
+                selector_state = {}
+
+            selector_text = str(selector_state.get("text", "")).strip()
+            selector_value = str(selector_state.get("value", "")).strip()
+            selector_text_norm = cls._normalize_completion_text(selector_text)
+            selector_value_norm = cls._normalize_completion_text(selector_value)
+            exists = bool(selector_state.get("exists", False))
+            passed = False
+            actual = ""
+
+            if check_type == "url_contains":
+                actual = str(snapshot.get("url", "")).strip()
+                passed = bool(expected_norm) and expected_norm in url
+            elif check_type == "title_contains":
+                actual = str(snapshot.get("title", "")).strip()
+                passed = bool(expected_norm) and expected_norm in title
+            elif check_type == "body_contains":
+                actual = str(snapshot.get("body_text", "")).strip()
+                passed = bool(expected_norm) and expected_norm in body_text
+            elif check_type == "selector_exists":
+                actual = "present" if exists else "missing"
+                passed = exists
+            elif check_type == "selector_text_contains":
+                actual = selector_text
+                passed = bool(expected_norm) and expected_norm in selector_text_norm
+            elif check_type == "selector_text_equals":
+                actual = selector_text
+                passed = bool(expected_norm) and selector_text_norm == expected_norm
+            elif check_type == "selector_value_contains":
+                actual = selector_value
+                passed = bool(expected_norm) and expected_norm in selector_value_norm
+            elif check_type == "selector_value_equals":
+                actual = selector_value
+                passed = bool(expected_norm) and selector_value_norm == expected_norm
+
+            results.append(
+                {
+                    "name": str(raw.get("name", f"check_{index + 1}")).strip() or f"check_{index + 1}",
+                    "type": check_type,
+                    "selector": selector,
+                    "route": str(raw.get("route", "")).strip(),
+                    "expected": expected,
+                    "actual": actual,
+                    "passed": passed,
+                }
+            )
+
+        normalized_mode = str(completion_mode or "all").strip().lower()
+        if not results:
+            completion_ready = False
+        elif normalized_mode == "any":
+            completion_ready = any(bool(item.get("passed", False)) for item in results)
+        else:
+            completion_ready = all(bool(item.get("passed", False)) for item in results)
+
+        return {
+            "completion_ready": completion_ready,
+            "goal_ready": completion_ready,
+            "evidence_ready": completion_ready,
+            "completion_checks": results,
+        }
+

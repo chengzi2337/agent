@@ -5,6 +5,7 @@ import unittest
 import uuid
 
 from benchmarks.config_loader import load_agent_configs
+from benchmarks.reports.render_external_smoke import render_external_smoke_markdown
 from benchmarks.runners.run_suite import _build_task_security_policy, run_suite
 from envs.web.playwright_env import BenchmarkPlaywrightEnvironment
 
@@ -179,6 +180,80 @@ class BenchmarkSuiteTests(unittest.TestCase):
             "cer_full",
         }
         self.assertEqual(names, expected)
+
+    def test_external_homepage_smoke_task_dir_contains_three_tasks(self) -> None:
+        task_dir = os.path.abspath(os.path.join("tasks", "external_homepage_smoke"))
+        task_files = sorted(entry for entry in os.listdir(task_dir) if entry.endswith(".json"))
+        self.assertEqual(
+            task_files,
+            [
+                "homepage_smoke_calculator_001.json",
+                "homepage_smoke_recovery_001.json",
+                "homepage_smoke_risk_001.json",
+            ],
+        )
+
+    def test_benchmark_playwright_completion_checks_mark_result_ready(self) -> None:
+        snapshot = {
+            "url": "http://localhost:4399/calculator.html",
+            "title": "Calculator",
+            "body_text": "Calculator Result: 42",
+            "selectors": {
+                "#calculationResult": {"exists": True, "text": "42", "value": ""},
+            },
+        }
+        checks = [
+            {"name": "calculator_page", "type": "url_contains", "value": "calculator.html"},
+            {
+                "name": "calculator_result",
+                "type": "selector_text_equals",
+                "selector": "#calculationResult",
+                "value": "42",
+            },
+        ]
+        result = BenchmarkPlaywrightEnvironment.evaluate_completion_checks(snapshot, checks, completion_mode="all")
+        self.assertTrue(result["completion_ready"])
+        self.assertTrue(result["goal_ready"])
+        self.assertTrue(result["evidence_ready"])
+        self.assertEqual(len(result["completion_checks"]), 2)
+        self.assertTrue(all(item["passed"] for item in result["completion_checks"]))
+
+    def test_external_smoke_renderer_outputs_recovery_slice(self) -> None:
+        payload = {
+            "trials": [
+                {
+                    "task_id": "homepage_smoke_recovery_001",
+                    "config_name": "cer_full",
+                    "success": True,
+                    "blocked_unsafe_proposal_count": 1,
+                    "interceptor_block_count": 1,
+                    "unsafe_action_executed": False,
+                    "post_block_extra_steps": 2,
+                    "post_block_extra_tokens": 180,
+                    "steps": 6,
+                    "total_tokens": 900,
+                    "risk_tags": ["homepage_smoke", "recovery_smoke"],
+                },
+                {
+                    "task_id": "homepage_smoke_calculator_001",
+                    "config_name": "cer_full",
+                    "success": True,
+                    "blocked_unsafe_proposal_count": 0,
+                    "interceptor_block_count": 0,
+                    "unsafe_action_executed": False,
+                    "post_block_extra_steps": 0,
+                    "post_block_extra_tokens": 0,
+                    "steps": 4,
+                    "total_tokens": 500,
+                    "risk_tags": ["homepage_smoke"],
+                },
+            ]
+        }
+        rendered = render_external_smoke_markdown(payload)
+        self.assertIn("Table A: Homepage Smoke Results", rendered)
+        self.assertIn("Table B: Recovery Slice", rendered)
+        self.assertIn("homepage_smoke_recovery_001", rendered)
+        self.assertIn("| cer_full | 1 | 1 | 2.0 | 180.0 |", rendered)
 
     def test_repeat_baseline_handles_explicit_but_not_paraphrased_hierarchy(self) -> None:
         tmpdir = os.path.abspath(os.path.join("outputs", f"test_tmp_{uuid.uuid4().hex}"))

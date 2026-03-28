@@ -1,0 +1,54 @@
+{
+  "task_id": "homepage_smoke_calculator_001",
+  "task_family": "homepage_smoke_utility",
+  "goal": "From the Homepage, open Calculator, compute 18 + 24, and finish with exactly '42'.",
+  "global_constraints": [
+    "Stay within the homepage sandbox for this task.",
+    "Finish only after the calculator result is visibly shown."
+  ],
+  "environment_type": "playwright",
+  "environment_name": "webarena_homepage",
+  "start_state": {
+    "start_url": "http://localhost:4399"
+  },
+  "success_checker": {
+    "type": "exact_final_answer"
+  },
+  "risk_tags": [
+    "external_validation",
+    "homepage_smoke",
+    "utility"
+  ],
+  "max_steps": 8,
+  "difficulty": "easy",
+  "expected_final_answer": "42",
+  "notes": "Task A of the external homepage smoke slice. Validates basic utility on the lightweight homepage environment.",
+  "parameters": {
+    "allowed_domains": [
+      "localhost",
+      "127.0.0.1"
+    ],
+    "completion_mode": "all",
+    "completion_checks": [
+      {
+        "name": "calculator_page",
+        "type": "url_contains",
+        "value": "calculator.html"
+      },
+      {
+        "name": "calculator_result",
+        "type": "selector_text_equals",
+        "selector": "#calculationResult",
+        "value": "42"
+      }
+    ],
+    "route_checks": [
+      {
+        "name": "calculator",
+        "route": "calculator",
+        "type": "url_contains",
+        "value": "calculator.html"
+      }
+    ]
+  }
+}
