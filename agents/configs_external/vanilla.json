@@ -1,0 +1,11 @@
+{
+  "repeat_constraints_each_step": false,
+  "history_mode": "full",
+  "action_history_limit": 8,
+  "name": "vanilla",
+  "description": "Legacy baseline with no isolated context, no finish control, no dead-end recovery, and no interception.",
+  "use_isolation": false,
+  "enable_dead_end_memory": false,
+  "enable_finish_gate": false,
+  "enable_static_interceptor": false
+}

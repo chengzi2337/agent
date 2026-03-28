@@ -167,6 +167,19 @@ class BenchmarkSuiteTests(unittest.TestCase):
         }
         self.assertEqual(names, expected)
 
+    def test_external_config_dir_contains_expected_configs(self) -> None:
+        configs = load_agent_configs(os.path.abspath(os.path.join("agents", "configs_external")))
+        names = {item["name"] for item in configs}
+        expected = {
+            "vanilla",
+            "context_only",
+            "interceptor_only",
+            "context_finish_interceptor",
+            "context_deadend_interceptor",
+            "cer_full",
+        }
+        self.assertEqual(names, expected)
+
     def test_repeat_baseline_handles_explicit_but_not_paraphrased_hierarchy(self) -> None:
         tmpdir = os.path.abspath(os.path.join("outputs", f"test_tmp_{uuid.uuid4().hex}"))
         task_dir = os.path.join(tmpdir, "tasks")
