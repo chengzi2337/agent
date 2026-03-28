@@ -1,0 +1,11 @@
+{
+  "repeat_constraints_each_step": false,
+  "history_mode": "full",
+  "action_history_limit": 8,
+  "name": "context_finish",
+  "description": "Structured context isolation plus finish gating.",
+  "use_isolation": true,
+  "enable_dead_end_memory": false,
+  "enable_finish_gate": true,
+  "enable_static_interceptor": false
+}

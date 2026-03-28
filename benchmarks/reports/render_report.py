@@ -9,7 +9,26 @@ from typing import Any, Dict, Iterable, List, Tuple
 from benchmarks.schemas import ConfigSummary, TrialEvaluation
 
 
-ABLATION_ORDER = ["vanilla", "slots_only", "slots_finish", "slots_deadend", "cer_full"]
+ABLATION_ORDER = [
+    "vanilla",
+    "slots_only",
+    "slots_finish",
+    "slots_deadend",
+    "guard_only",
+    "context_only",
+    "finish_only",
+    "deadend_only",
+    "interceptor_only",
+    "context_finish",
+    "context_deadend",
+    "finish_deadend",
+    "finish_interceptor",
+    "deadend_interceptor",
+    "context_finish_deadend",
+    "context_finish_interceptor",
+    "context_deadend_interceptor",
+    "cer_full",
+]
 
 
 def write_report_bundle(
@@ -273,8 +292,16 @@ def build_ablation_summaries(trials: List[TrialEvaluation]) -> List[Dict[str, An
         grouped.setdefault(trial["config_name"], []).append(trial)
 
     rows: List[Dict[str, Any]] = []
+    seen: set[str] = set()
     for config_name in ABLATION_ORDER:
-        if config_name not in grouped:
+        if config_name in seen or config_name not in grouped:
+            continue
+        summary = _aggregate_trials(grouped[config_name])
+        summary["config_name"] = config_name
+        rows.append(summary)
+        seen.add(config_name)
+    for config_name in sorted(grouped):
+        if config_name in seen:
             continue
         summary = _aggregate_trials(grouped[config_name])
         summary["config_name"] = config_name

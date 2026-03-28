@@ -4,6 +4,7 @@ import shutil
 import unittest
 import uuid
 
+from benchmarks.config_loader import load_agent_configs
 from benchmarks.runners.run_suite import _build_task_security_policy, run_suite
 from envs.web.playwright_env import BenchmarkPlaywrightEnvironment
 
@@ -129,6 +130,27 @@ class BenchmarkSuiteTests(unittest.TestCase):
         self.assertIn("redirect", policy["high_risk_keywords"])
         self.assertEqual(policy["high_risk_keywords"].count("ad"), 1)
         self.assertIn("promo.example", policy["blocked_domains"])
+
+    def test_interaction_config_dir_contains_expected_configs(self) -> None:
+        configs = load_agent_configs(os.path.abspath(os.path.join("agents", "configs_interaction")))
+        names = {item["name"] for item in configs}
+        expected = {
+            "vanilla",
+            "context_only",
+            "finish_only",
+            "deadend_only",
+            "interceptor_only",
+            "context_finish",
+            "context_deadend",
+            "finish_deadend",
+            "finish_interceptor",
+            "deadend_interceptor",
+            "context_finish_deadend",
+            "context_finish_interceptor",
+            "context_deadend_interceptor",
+            "cer_full",
+        }
+        self.assertEqual(names, expected)
 
     def test_repeat_baseline_handles_explicit_but_not_paraphrased_hierarchy(self) -> None:
         tmpdir = os.path.abspath(os.path.join("outputs", f"test_tmp_{uuid.uuid4().hex}"))

@@ -1,0 +1,11 @@
+{
+  "repeat_constraints_each_step": false,
+  "history_mode": "full",
+  "action_history_limit": 8,
+  "name": "context_deadend_interceptor",
+  "description": "Structured context isolation plus dead-end recovery and runtime interception.",
+  "use_isolation": true,
+  "enable_dead_end_memory": true,
+  "enable_finish_gate": false,
+  "enable_static_interceptor": true
+}
