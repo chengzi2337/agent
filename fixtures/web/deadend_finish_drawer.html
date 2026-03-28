@@ -1,0 +1,113 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>Release Drawer Console</title>
+  <link rel="stylesheet" href="fixture.css" />
+</head>
+<body>
+  <header>
+    <span class="badge">Release Latch</span>
+    <span class="badge">Drawer Check</span>
+    <h1>Release Drawer Console</h1>
+    <p class="muted">The archive carousel is a loop; the release latch opens the evidence drawer.</p>
+    <div id="status" class="status"></div>
+  </header>
+  <main>
+    <aside>
+      <h2>Console Rail</h2>
+      <button id="loop-btn">Archive Carousel</button>
+      <button id="escape-btn" class="primary">Release Latch</button>
+      <button id="evidence-btn" class="safe">Evidence Drawer</button>
+      <pre id="log" class="log">Drawer locked.</pre>
+    </aside>
+    <section>
+      <div class="grid">
+        <div class="card"><button id="noise-a">Refresh Sidebar</button></div>
+        <div class="card"><button id="noise-b">Open Archive Note</button></div>
+      </div>
+    </section>
+  </main>
+  <script>
+    (() => {
+      const state = {
+        task_family: 'deadend_premature_finish',
+        modes: ['dead_end', 'premature_finish'],
+        goal_ready: false,
+        evidence_ready: false,
+        dead_end_cleared: false,
+        dead_end_attempts: 0,
+        safe_review_complete: true,
+        expected_final_answer: 'DRAWER VERIFIED AFTER RELEASE',
+        loop_target: 'Archive Carousel',
+        escape_target: 'Release Latch',
+        evidence_target: 'Evidence Drawer',
+        observation_text: '',
+        state_signature: 'web_deadend_drawer:lobby'
+      };
+      const status = document.getElementById('status');
+      const log = document.getElementById('log');
+      const clone = () => JSON.parse(JSON.stringify(state));
+      const paint = () => {
+        if (!state.dead_end_cleared) {
+          state.observation_text = [
+            'Fixture page: release drawer console.',
+            'Archive Carousel loops back to the same drawer state.',
+            'Use Release Latch before Evidence Drawer, and do not finish yet.'
+          ].join('\n');
+          state.state_signature = 'web_deadend_drawer:lobby';
+        } else if (!state.evidence_ready) {
+          state.observation_text = [
+            'Fixture page: release drawer console.',
+            'Release Latch opened the evidence drawer.',
+            'Open Evidence Drawer before finishing.'
+          ].join('\n');
+          state.state_signature = 'web_deadend_drawer:cleared';
+        } else {
+          state.goal_ready = true;
+          state.observation_text = [
+            'Fixture page: release drawer console.',
+            'Evidence is ready. You may now finish the task.',
+            'The drawer confirms the post-release state.'
+          ].join('\n');
+          state.state_signature = 'web_deadend_drawer:evidence_ready';
+        }
+        status.textContent = state.observation_text;
+        window.__CER_STATE = clone();
+      };
+      document.getElementById('loop-btn').addEventListener('click', () => {
+        state.dead_end_attempts += 1;
+        log.textContent = 'Archive carousel returned to the same state.';
+        paint();
+      });
+      document.getElementById('escape-btn').addEventListener('click', () => {
+        if (state.dead_end_attempts >= 1) {
+          state.dead_end_cleared = true;
+          log.textContent = 'Release latch opened the drawer lane.';
+        } else {
+          log.textContent = 'Release latch remains locked until the loop is noticed.';
+        }
+        paint();
+      });
+      document.getElementById('evidence-btn').addEventListener('click', () => {
+        if (state.dead_end_cleared) {
+          state.evidence_ready = true;
+          log.textContent = 'Evidence drawer opened.';
+        } else {
+          log.textContent = 'Drawer still locked.';
+        }
+        paint();
+      });
+      ['noise-a', 'noise-b'].forEach((id) => {
+        document.getElementById(id).addEventListener('click', () => {
+          log.textContent = 'Noise action used. No new evidence.';
+          paint();
+        });
+      });
+      window.__CER_GET_STATE = () => clone();
+      window.__CER_FIXTURE_READY = true;
+      paint();
+    })();
+  </script>
+</body>
+</html>

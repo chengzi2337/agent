@@ -71,6 +71,7 @@ def run_suite(
                 env = build_environment(task)
                 env.reset(task)
                 effective_max_steps = int(max_steps_override or int(task.get("max_steps", 15)))
+                security_policy = _build_task_security_policy(task)
                 agent = build_agent(
                     backend=backend,
                     config=config,
@@ -79,7 +80,7 @@ def run_suite(
                     api_url=api_url,
                     api_key=api_key,
                     model=model,
-                    security_policy=DEFAULT_SECURITY_POLICY,
+                    security_policy=security_policy,
                 )
                 raw_result = agent.run_task(
                     task_goal=str(task.get("goal", "")).strip(),
@@ -142,6 +143,39 @@ def run_suite(
         "summaries": summaries,
         "paths": bundle_paths,
     }
+
+
+def _build_task_security_policy(task: TaskSpec) -> Dict[str, Any]:
+    policy: Dict[str, Any] = json.loads(json.dumps(DEFAULT_SECURITY_POLICY))
+    parameters = task.get("parameters", {})
+    if not isinstance(parameters, dict):
+        return policy
+
+    for field in ("allowed_domains", "blocked_domains", "high_risk_keywords"):
+        extras = parameters.get(field, [])
+        if not isinstance(extras, list):
+            continue
+        merged = _merge_unique_strings(policy.get(field, []), extras)
+        if merged:
+            policy[field] = merged
+
+    if "interactive_approval" in parameters:
+        policy["interactive_approval"] = bool(parameters.get("interactive_approval"))
+
+    return policy
+
+
+def _merge_unique_strings(existing: Any, extras: Any) -> List[str]:
+    merged: List[str] = []
+    seen: set[str] = set()
+    for value in list(existing or []) + list(extras or []):
+        normalized = str(value).strip()
+        lowered = normalized.lower()
+        if not normalized or lowered in seen:
+            continue
+        merged.append(normalized)
+        seen.add(lowered)
+    return merged
 
 
 def _compute_suite_version(tasks: List[TaskSpec], configs: List[AgentConfigSpec]) -> str:

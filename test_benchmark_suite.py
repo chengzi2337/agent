@@ -4,7 +4,7 @@ import shutil
 import unittest
 import uuid
 
-from benchmarks.runners.run_suite import run_suite
+from benchmarks.runners.run_suite import _build_task_security_policy, run_suite
 from envs.web.playwright_env import BenchmarkPlaywrightEnvironment
 
 
@@ -111,6 +111,21 @@ class BenchmarkSuiteTests(unittest.TestCase):
             self.assertIn("constraint_export.html", resolved)
         finally:
             env.close()
+
+    def test_task_security_policy_merges_task_keywords(self) -> None:
+        task = {
+            "task_id": "risk_merge",
+            "parameters": {
+                "high_risk_keywords": ["Sponsor", "redirect", "ad"],
+                "blocked_domains": ["promo.example"],
+            },
+        }
+        policy = _build_task_security_policy(task)
+        self.assertIn("advertisement", policy["high_risk_keywords"])
+        self.assertIn("Sponsor", policy["high_risk_keywords"])
+        self.assertIn("redirect", policy["high_risk_keywords"])
+        self.assertEqual(policy["high_risk_keywords"].count("ad"), 1)
+        self.assertIn("promo.example", policy["blocked_domains"])
 
     def test_repeat_baseline_handles_explicit_but_not_paraphrased_hierarchy(self) -> None:
         tmpdir = os.path.abspath(os.path.join("outputs", f"test_tmp_{uuid.uuid4().hex}"))

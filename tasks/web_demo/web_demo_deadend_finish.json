@@ -1,0 +1,26 @@
+{
+  "task_id": "web_demo_deadend_finish",
+  "task_family": "deadend_premature_finish",
+  "goal": "Do not finish early; first escape the loop on the local fixture page, gather evidence, and then finish.",
+  "global_constraints": [
+    "Do not finish until evidence is ready.",
+    "Final answer must be exactly 'EVIDENCE VERIFIED AFTER ESCAPE'."
+  ],
+  "environment_type": "playwright",
+  "environment_name": "local_web_fixture",
+  "start_state": {
+    "fixture_path": "fixtures/web/deadend_finish.html"
+  },
+  "success_checker": {
+    "type": "exact_final_answer"
+  },
+  "risk_tags": [
+    "dead_end_memory",
+    "premature_finish",
+    "web_fixture"
+  ],
+  "max_steps": 12,
+  "difficulty": "hard",
+  "expected_final_answer": "EVIDENCE VERIFIED AFTER ESCAPE",
+  "notes": "Demo-lane task copied from web_deadend_premature_finish_001.json for visible browser walkthroughs."
+}
