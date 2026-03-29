@@ -4,6 +4,7 @@ import shutil
 import unittest
 import uuid
 
+from cer_architecture import CERAgent, CERDistiller, CERMemory, CERRetriever
 from benchmarks.config_loader import load_agent_configs
 from benchmarks.reports.render_external_smoke import render_external_smoke_markdown
 from benchmarks.runners.run_suite import _build_task_security_policy, run_suite
@@ -217,6 +218,66 @@ class BenchmarkSuiteTests(unittest.TestCase):
         self.assertTrue(result["evidence_ready"])
         self.assertEqual(len(result["completion_checks"]), 2)
         self.assertTrue(all(item["passed"] for item in result["completion_checks"]))
+
+    def test_benchmark_playwright_observation_ids_resolve_prompt_targets(self) -> None:
+        class DummyPage:
+            url = "http://127.0.0.1:4399/"
+
+            @staticmethod
+            def title() -> str:
+                return "Homepage"
+
+        env = BenchmarkPlaywrightEnvironment()
+        try:
+            env._ensure_page = lambda: DummyPage()
+            env._read_fixture_state = lambda page=None: {}
+            env._collect_a11y_nodes = lambda page, max_items=80: [
+                {"role": "link", "text": "Calculator", "selector": 'a[href="calculator.html"]'},
+                {"role": "button", "text": "=", "selector": "#calculate"},
+            ]
+            observation = env.get_observation()
+            self.assertEqual(observation["a11y_nodes"][0]["id"], 1)
+            self.assertEqual(observation["a11y_nodes"][1]["id"], 2)
+            self.assertEqual(env._resolve_target("[1]"), 'a[href="calculator.html"]')
+            self.assertEqual(env._resolve_target("[2] button '=' selector='#calculate'"), "#calculate")
+        finally:
+            env.close()
+
+    def test_security_policy_allows_relative_same_origin_navigation(self) -> None:
+        memory = CERMemory()
+        agent = CERAgent(
+            memory=memory,
+            distiller=CERDistiller(),
+            retriever=CERRetriever(memory),
+            environment=lambda action: {"done": False},
+            security_policy={"allowed_domains": ["127.0.0.1", "localhost"]},
+        )
+
+        current_observation = {"url": "http://127.0.0.1:4399/"}
+        self.assertIsNone(agent._evaluate_security_policy({"type": "goto", "target": "calculator.html"}, current_observation))
+        self.assertIsNone(agent._evaluate_security_policy({"type": "goto", "target": "scratchpad.html"}, current_observation))
+        self.assertEqual(
+            agent._evaluate_security_policy({"type": "goto", "target": "https://evil.example"}, current_observation),
+            "Security Violation: Domain not in allowed_domains list.",
+        )
+
+    def test_security_policy_does_not_match_short_keyword_inside_scratchpad(self) -> None:
+        memory = CERMemory()
+        agent = CERAgent(
+            memory=memory,
+            distiller=CERDistiller(),
+            retriever=CERRetriever(memory),
+            environment=lambda action: {"done": False},
+            security_policy={"high_risk_keywords": ["ad"]},
+        )
+
+        self.assertFalse(agent._contains_high_risk_keyword("scratchpad", "ad"))
+        self.assertTrue(agent._contains_high_risk_keyword("view ad now", "ad"))
+        self.assertIsNone(agent._evaluate_security_policy({"type": "click", "target": "Scratchpad"}))
+        self.assertEqual(
+            agent._evaluate_security_policy({"type": "click", "target": "View Ad"}), 
+            "Security Violation: Action contains high-risk keyword 'ad'.",
+        )
 
     def test_external_smoke_renderer_outputs_recovery_slice(self) -> None:
         payload = {

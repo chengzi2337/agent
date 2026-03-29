@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from pathlib import Path
 from typing import Any, Dict, List
+from urllib.parse import urljoin, urlsplit
 
 from playwright_environment import PlaywrightEnvironment
 
@@ -69,12 +71,13 @@ class BenchmarkPlaywrightEnvironment(PlaywrightEnvironment):
         try:
             page = self._ensure_page()
             if action_type in {"goto", "navigate"}:
-                url = str(action.get("url", action.get("target", action.get("value", "")))).strip()
+                url = str(action.get("url", action.get("content", action.get("target", action.get("value", ""))))).strip()
                 if not url:
                     result = {"done": False, "error": "goto action requires a URL."}
                 else:
-                    page.goto(url, wait_until="domcontentloaded")
-                    result = {"done": False, "observation": f"Navigated to: {url}"}
+                    normalized_url = self._normalize_navigation_url(page, url)
+                    page.goto(normalized_url, wait_until="domcontentloaded")
+                    result = {"done": False, "observation": f"Navigated to: {normalized_url}"}
             elif action_type == "wait":
                 seconds = self._parse_wait_seconds(str(action.get("value", "")).strip())
                 page.wait_for_timeout(int(seconds * 1000))
@@ -110,6 +113,7 @@ class BenchmarkPlaywrightEnvironment(PlaywrightEnvironment):
             state = self._read_fixture_state(page)
             a11y_nodes = self._collect_a11y_nodes(page, max_items=max_items)
             a11y_nodes.extend(self._build_completion_evidence_nodes(state))
+            a11y_nodes = self._assign_observation_ids(a11y_nodes)
             url = str(page.url)
             title = str(page.title())
         except Exception as exc:
@@ -157,6 +161,32 @@ class BenchmarkPlaywrightEnvironment(PlaywrightEnvironment):
                 merged[key] = value
         merged["count"] = len(a11y_nodes)
         return merged
+
+    def _resolve_target(self, target: str) -> str:
+        cleaned = str(target).strip()
+        if not cleaned:
+            return cleaned
+
+        exact_match = re.match(r"^\[(\d+)\]$", cleaned)
+        if exact_match:
+            observation_id = int(exact_match.group(1))
+            return self._id_to_selector.get(observation_id, cleaned)
+
+        prefixed_match = re.match(r"^\[(\d+)\]\s+", cleaned)
+        if prefixed_match:
+            observation_id = int(prefixed_match.group(1))
+            if observation_id in self._id_to_selector:
+                return self._id_to_selector[observation_id]
+
+        selector_match = re.search(r"selector='([^']+)'", cleaned)
+        if selector_match:
+            return selector_match.group(1).strip()
+
+        named_target_match = re.match(r"^\[\?\]\s+\w+\s+'(.+?)'(?:\s+selector=.*)?$", cleaned)
+        if named_target_match:
+            return named_target_match.group(1).strip()
+
+        return super()._resolve_target(cleaned)
 
     def get_state_signature(self) -> str:
         state = self._read_fixture_state()
@@ -392,6 +422,56 @@ class BenchmarkPlaywrightEnvironment(PlaywrightEnvironment):
                 }
             )
         return nodes
+
+    def _assign_observation_ids(self, nodes: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        self._id_to_selector = {}
+        annotated: List[Dict[str, Any]] = []
+        next_observation_id = 1
+
+        for raw in nodes:
+            if not isinstance(raw, dict):
+                continue
+            node = dict(raw)
+            selector = str(node.get("selector", "")).strip()
+            role = str(node.get("role", "")).strip().lower()
+            if selector and role != "status":
+                node["id"] = next_observation_id
+                self._id_to_selector[next_observation_id] = selector
+                next_observation_id += 1
+            annotated.append(node)
+        return annotated
+
+    @classmethod
+    def _looks_like_relative_page_path(cls, target: str) -> bool:
+        cleaned = str(target or "").strip()
+        if not cleaned:
+            return False
+        if cleaned.startswith(("/", "./", "../", "#", "?")):
+            return True
+        if re.match(r"^[a-zA-Z][a-zA-Z0-9+.-]*://", cleaned) or cleaned.startswith("//"):
+            return False
+
+        lowered = cleaned.lower()
+        if lowered.endswith((".html", ".htm", ".php", ".asp", ".aspx", ".jsp")):
+            return True
+        return "." not in cleaned and ":" not in cleaned
+
+    @classmethod
+    def _normalize_navigation_url(cls, page: Any, url: str) -> str:
+        cleaned = str(url or "").strip()
+        if not cleaned:
+            return cleaned
+        if re.match(r"^[a-zA-Z][a-zA-Z0-9+.-]*://", cleaned):
+            return cleaned
+        if cleaned.startswith("//"):
+            current_scheme = urlsplit(str(getattr(page, "url", "") or "")).scheme or "http"
+            return f"{current_scheme}:{cleaned}"
+        if cls._looks_like_relative_page_path(cleaned):
+            base_url = str(getattr(page, "url", "") or "").strip()
+            return urljoin(base_url, cleaned) if base_url else cleaned
+        if re.match(r"^(?:localhost|127(?:\.\d{1,3}){3})(?::\d+)?(?:/.*)?$", cleaned, flags=re.IGNORECASE):
+            return f"http://{cleaned}"
+        return f"http://{cleaned}"
 
     @staticmethod
     def _normalize_completion_text(value: Any) -> str:

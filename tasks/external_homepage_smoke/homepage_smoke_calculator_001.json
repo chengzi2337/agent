@@ -9,7 +9,7 @@
   "environment_type": "playwright",
   "environment_name": "webarena_homepage",
   "start_state": {
-    "start_url": "http://localhost:4399"
+    "start_url": "http://127.0.0.1:4399"
   },
   "success_checker": {
     "type": "exact_final_answer"

@@ -214,6 +214,7 @@ start_homepage() {
   load_python_env
   local homepage_dir="${REPO_DIR}/environment_docker/webarena-homepage"
   local index_file="${homepage_dir}/templates/index.html"
+  local venv_python="${VENV_DIR}/bin/python"
   python3 - <<PY
 from pathlib import Path
 
@@ -229,7 +230,7 @@ PY
   fi
 
   log "Starting homepage flask app"
-  nohup bash -lc "cd '$homepage_dir' && FLASK_APP=app.py flask run --host=0.0.0.0 --port=4399" >"$DEFAULT_HOME/vwa_homepage.log" 2>&1 &
+  nohup bash -lc "cd '$homepage_dir' && FLASK_APP=app.py '$venv_python' -m flask run --host=0.0.0.0 --port=4399" >"$DEFAULT_HOME/vwa_homepage.log" 2>&1 &
   sleep 5
 }
 

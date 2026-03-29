@@ -8,7 +8,7 @@ import sys
 import time
 from copy import deepcopy
 from typing import Any, Callable, Dict, List, Optional, Protocol, Tuple, TypedDict, cast
-from urllib.parse import unquote, urlsplit, urlunsplit
+from urllib.parse import unquote, urljoin, urlsplit, urlunsplit
 
 import requests
 
@@ -1111,7 +1111,7 @@ class CERAgent:
                 )
                 break
 
-            violation_error = self._evaluate_security_policy(action) if self.enable_static_interceptor else None
+            violation_error = self._evaluate_security_policy(action, current_observation) if self.enable_static_interceptor else None
             if violation_error is not None:
                 interceptor_result = {
                     "enabled": True,
@@ -1130,7 +1130,7 @@ class CERAgent:
                     "block_reason": "",
                     "risk_class": "",
                 }
-                env_result = self._execute_action(action)
+                env_result = self._execute_action(action, current_observation=current_observation)
             post_observation = self._get_environment_observation()
             state_signature_after = self._get_environment_state_signature(post_observation)
             if self.trace_enabled:
@@ -2244,11 +2244,11 @@ class CERAgent:
             preview = f"{preview} | ...(+{remaining})"
         return preview
 
-    def _execute_action(self, action: AgentAction) -> Dict[str, Any]:
+    def _execute_action(self, action: AgentAction, current_observation: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         """Execute one action against injected environment adapter."""
 
         try:
-            violation_error = self._evaluate_security_policy(action) if self.enable_static_interceptor else None
+            violation_error = self._evaluate_security_policy(action, current_observation) if self.enable_static_interceptor else None
             if violation_error is not None:
                 return {
                     "done": False,
@@ -2266,7 +2266,56 @@ class CERAgent:
         except Exception as exc:
             return {"done": False, "error": f"action_execution_failed: {exc}"}
 
-    def _evaluate_security_policy(self, action: AgentAction) -> Optional[str]:
+    @staticmethod
+    def _looks_like_relative_navigation_target(target: str) -> bool:
+        cleaned = str(target or "").strip()
+        if not cleaned:
+            return False
+        if cleaned.startswith(("/", "./", "../", "#", "?")):
+            return True
+        if re.match(r"^[a-zA-Z][a-zA-Z0-9+.-]*://", cleaned) or cleaned.startswith("//"):
+            return False
+
+        lowered = cleaned.lower()
+        if lowered.endswith((".html", ".htm", ".php", ".asp", ".aspx", ".jsp")):
+            return True
+        return "." not in cleaned and ":" not in cleaned
+
+    def _normalize_navigation_target_for_policy(
+        self,
+        target: str,
+        current_observation: Optional[Dict[str, Any]] = None,
+    ) -> str:
+        cleaned = str(target or "").strip()
+        if not cleaned:
+            return cleaned
+        if re.match(r"^[a-zA-Z][a-zA-Z0-9+.-]*://", cleaned):
+            return cleaned
+        if cleaned.startswith("//"):
+            base_url = str((current_observation or {}).get("url", "") if isinstance(current_observation, dict) else "").strip()
+            base_scheme = urlsplit(base_url).scheme or "http"
+            return f"{base_scheme}:{cleaned}"
+        if self._looks_like_relative_navigation_target(cleaned):
+            base_url = str((current_observation or {}).get("url", "") if isinstance(current_observation, dict) else "").strip()
+            return urljoin(base_url, cleaned) if base_url else cleaned
+        return f"http://{cleaned}"
+
+    @staticmethod
+    def _contains_high_risk_keyword(text: str, keyword: str) -> bool:
+        normalized_text = str(text or "").strip().lower()
+        normalized_keyword = str(keyword or "").strip().lower()
+        if not normalized_text or not normalized_keyword:
+            return False
+        if re.fullmatch(r"[a-z0-9]+", normalized_keyword):
+            pattern = rf"(?<![a-z0-9]){re.escape(normalized_keyword)}(?![a-z0-9])"
+            return re.search(pattern, normalized_text) is not None
+        return normalized_keyword in normalized_text
+
+    def _evaluate_security_policy(
+        self,
+        action: AgentAction,
+        current_observation: Optional[Dict[str, Any]] = None,
+    ) -> Optional[str]:
         """Return a violation string when an action breaks the static security policy."""
 
         action_type = str(action.get("type", "")).strip().lower()
@@ -2277,7 +2326,7 @@ class CERAgent:
         if action_type in {"goto", "navigate"}:
             allowed_domains = self.security_policy.get("allowed_domains", [])
             if allowed_domains:
-                parsed = urlsplit(url or target or value)
+                parsed = urlsplit(self._normalize_navigation_target_for_policy(url or target or value, current_observation))
                 netloc = parsed.netloc.strip().lower()
                 if ":" in netloc:
                     netloc = netloc.split(":", 1)[0]
@@ -2305,9 +2354,9 @@ class CERAgent:
             if not normalized_keyword:
                 continue
             if (
-                normalized_keyword in normalized_target
-                or normalized_keyword in normalized_value
-                or normalized_keyword in metadata_text
+                self._contains_high_risk_keyword(normalized_target, normalized_keyword)
+                or self._contains_high_risk_keyword(normalized_value, normalized_keyword)
+                or self._contains_high_risk_keyword(metadata_text, normalized_keyword)
             ):
                 return f"Security Violation: Action contains high-risk keyword '{keyword}'."
 
