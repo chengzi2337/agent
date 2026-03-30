@@ -22,6 +22,11 @@ class BenchmarkPlaywrightEnvironment(PlaywrightEnvironment):
             "risky_targets": [],
             "risky_keywords": [],
         }
+        self.runtime_completion_memory: Dict[str, Any] = {
+            "selectors": {},
+            "urls": [],
+            "titles": [],
+        }
 
     def reset(self, task_spec: Dict[str, Any]) -> Dict[str, Any]:
         self.task_spec = task_spec
@@ -31,6 +36,11 @@ class BenchmarkPlaywrightEnvironment(PlaywrightEnvironment):
             "unsafe_action_executed": False,
             "risky_targets": [],
             "risky_keywords": [],
+        }
+        self.runtime_completion_memory = {
+            "selectors": {},
+            "urls": [],
+            "titles": [],
         }
         start_state = task_spec.get("start_state", {})
         start_url = self._resolve_start_url(start_state)
@@ -284,13 +294,21 @@ class BenchmarkPlaywrightEnvironment(PlaywrightEnvironment):
         has_checks = isinstance(checks, list) and bool(checks)
         risky_targets = parameters.get("risky_targets", [])
         risky_keywords = parameters.get("risky_keywords", parameters.get("high_risk_keywords", []))
-        selected_route = self._resolve_selected_route(page, parameters)
+        route_checks = parameters.get("route_checks", [])
+        combined_checks: List[Dict[str, Any]] = []
+        if isinstance(checks, list):
+            combined_checks.extend(item for item in checks if isinstance(item, dict))
+        if isinstance(route_checks, list):
+            combined_checks.extend(item for item in route_checks if isinstance(item, dict))
+        snapshot = self._capture_completion_snapshot(page, combined_checks)
+        self._update_runtime_completion_memory(snapshot)
+        completion_snapshot = self._merge_snapshot_with_runtime_memory(snapshot)
+        selected_route = self._resolve_selected_route_from_snapshot(snapshot, parameters)
 
         state: Dict[str, Any] = {}
         if has_checks:
-            snapshot = self._capture_completion_snapshot(page, checks)
             completion_state = self.evaluate_completion_checks(
-                snapshot=snapshot,
+                snapshot=completion_snapshot,
                 checks=checks,
                 completion_mode=str(parameters.get("completion_mode", "all")),
             )
@@ -304,17 +322,62 @@ class BenchmarkPlaywrightEnvironment(PlaywrightEnvironment):
             state["risky_keywords"] = [str(item).strip() for item in risky_keywords if str(item).strip()]
         return state
 
-    def _resolve_selected_route(self, page: Any, parameters: Dict[str, Any]) -> str:
+    def _resolve_selected_route_from_snapshot(self, snapshot: Dict[str, Any], parameters: Dict[str, Any]) -> str:
         route_checks = parameters.get("route_checks", [])
         if not isinstance(route_checks, list):
             return ""
 
-        snapshot = self._capture_completion_snapshot(page, route_checks)
         results = self.evaluate_completion_checks(snapshot=snapshot, checks=route_checks, completion_mode="any")
         for item in results.get("completion_checks", []):
             if isinstance(item, dict) and bool(item.get("passed", False)):
                 return str(item.get("route", item.get("name", ""))).strip()
         return ""
+
+    def _update_runtime_completion_memory(self, snapshot: Dict[str, Any]) -> None:
+        if not isinstance(snapshot, dict):
+            return
+
+        selector_states = snapshot.get("selectors", {})
+        if isinstance(selector_states, dict):
+            runtime_selectors = self.runtime_completion_memory.setdefault("selectors", {})
+            for selector, state in selector_states.items():
+                if not isinstance(state, dict):
+                    continue
+                normalized_selector = str(selector or "").strip()
+                if not normalized_selector:
+                    continue
+
+                previous = runtime_selectors.get(normalized_selector, {})
+                if not isinstance(previous, dict):
+                    previous = {}
+
+                exists = bool(state.get("exists", False))
+                text_value = str(state.get("text", "")).strip()
+                form_value = str(state.get("value", "")).strip()
+                runtime_selectors[normalized_selector] = {
+                    "exists": bool(previous.get("exists", False) or exists),
+                    "text": text_value or str(previous.get("text", "")).strip(),
+                    "value": form_value or str(previous.get("value", "")).strip(),
+                }
+
+        url = str(snapshot.get("url", "")).strip()
+        if url:
+            runtime_urls = self.runtime_completion_memory.setdefault("urls", [])
+            if isinstance(runtime_urls, list) and url not in runtime_urls:
+                runtime_urls.append(url)
+
+        title = str(snapshot.get("title", "")).strip()
+        if title:
+            runtime_titles = self.runtime_completion_memory.setdefault("titles", [])
+            if isinstance(runtime_titles, list) and title not in runtime_titles:
+                runtime_titles.append(title)
+
+    def _merge_snapshot_with_runtime_memory(self, snapshot: Dict[str, Any]) -> Dict[str, Any]:
+        merged = dict(snapshot or {})
+        merged["runtime_selectors"] = dict(self.runtime_completion_memory.get("selectors", {}))
+        merged["runtime_urls"] = list(self.runtime_completion_memory.get("urls", []))
+        merged["runtime_titles"] = list(self.runtime_completion_memory.get("titles", []))
+        return merged
 
     def _capture_completion_snapshot(self, page: Any, checks: List[Dict[str, Any]]) -> Dict[str, Any]:
         selectors: List[str] = []
@@ -490,6 +553,15 @@ class BenchmarkPlaywrightEnvironment(PlaywrightEnvironment):
         selector_states = snapshot.get("selectors", {})
         if not isinstance(selector_states, dict):
             selector_states = {}
+        runtime_selector_states = snapshot.get("runtime_selectors", {})
+        if not isinstance(runtime_selector_states, dict):
+            runtime_selector_states = {}
+        runtime_urls = snapshot.get("runtime_urls", [])
+        if not isinstance(runtime_urls, list):
+            runtime_urls = []
+        runtime_titles = snapshot.get("runtime_titles", [])
+        if not isinstance(runtime_titles, list):
+            runtime_titles = []
 
         results: List[Dict[str, Any]] = []
         for index, raw in enumerate(checks):
@@ -508,33 +580,62 @@ class BenchmarkPlaywrightEnvironment(PlaywrightEnvironment):
             selector_text_norm = cls._normalize_completion_text(selector_text)
             selector_value_norm = cls._normalize_completion_text(selector_value)
             exists = bool(selector_state.get("exists", False))
+            runtime_selector_state = runtime_selector_states.get(selector, {}) if selector else {}
+            if not isinstance(runtime_selector_state, dict):
+                runtime_selector_state = {}
+            runtime_selector_text = str(runtime_selector_state.get("text", "")).strip()
+            runtime_selector_value = str(runtime_selector_state.get("value", "")).strip()
+            runtime_selector_text_norm = cls._normalize_completion_text(runtime_selector_text)
+            runtime_selector_value_norm = cls._normalize_completion_text(runtime_selector_value)
+            runtime_exists = bool(runtime_selector_state.get("exists", False))
             passed = False
             actual = ""
 
             if check_type == "url_contains":
                 actual = str(snapshot.get("url", "")).strip()
                 passed = bool(expected_norm) and expected_norm in url
+            elif check_type == "memory_url_contains":
+                actual = " | ".join(str(item).strip() for item in runtime_urls if str(item).strip())
+                passed = bool(expected_norm) and any(expected_norm in cls._normalize_completion_text(item) for item in runtime_urls)
             elif check_type == "title_contains":
                 actual = str(snapshot.get("title", "")).strip()
                 passed = bool(expected_norm) and expected_norm in title
+            elif check_type == "memory_title_contains":
+                actual = " | ".join(str(item).strip() for item in runtime_titles if str(item).strip())
+                passed = bool(expected_norm) and any(expected_norm in cls._normalize_completion_text(item) for item in runtime_titles)
             elif check_type == "body_contains":
                 actual = str(snapshot.get("body_text", "")).strip()
                 passed = bool(expected_norm) and expected_norm in body_text
             elif check_type == "selector_exists":
                 actual = "present" if exists else "missing"
                 passed = exists
+            elif check_type == "memory_selector_exists":
+                actual = "present" if runtime_exists else "missing"
+                passed = runtime_exists
             elif check_type == "selector_text_contains":
                 actual = selector_text
                 passed = bool(expected_norm) and expected_norm in selector_text_norm
+            elif check_type == "memory_selector_text_contains":
+                actual = runtime_selector_text
+                passed = bool(expected_norm) and expected_norm in runtime_selector_text_norm
             elif check_type == "selector_text_equals":
                 actual = selector_text
                 passed = bool(expected_norm) and selector_text_norm == expected_norm
+            elif check_type == "memory_selector_text_equals":
+                actual = runtime_selector_text
+                passed = bool(expected_norm) and runtime_selector_text_norm == expected_norm
             elif check_type == "selector_value_contains":
                 actual = selector_value
                 passed = bool(expected_norm) and expected_norm in selector_value_norm
+            elif check_type == "memory_selector_value_contains":
+                actual = runtime_selector_value
+                passed = bool(expected_norm) and expected_norm in runtime_selector_value_norm
             elif check_type == "selector_value_equals":
                 actual = selector_value
                 passed = bool(expected_norm) and selector_value_norm == expected_norm
+            elif check_type == "memory_selector_value_equals":
+                actual = runtime_selector_value
+                passed = bool(expected_norm) and runtime_selector_value_norm == expected_norm
 
             results.append(
                 {
