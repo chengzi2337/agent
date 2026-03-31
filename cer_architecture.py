@@ -2533,6 +2533,33 @@ def get_last_llm_error() -> str:
     return _LAST_LLM_ERROR
 
 
+def _format_llm_request_exception(exc: requests.exceptions.RequestException) -> str:
+    """Return a compact, artifact-friendly request error label."""
+
+    parts = [f"request_exception:{exc.__class__.__name__}"]
+    response = getattr(exc, "response", None)
+    if response is None:
+        return ":".join(parts)
+
+    status_code = getattr(response, "status_code", 0)
+    if status_code:
+        parts.append(f"status={status_code}")
+
+    try:
+        payload = response.json()
+    except ValueError:
+        payload = None
+
+    if isinstance(payload, dict):
+        error_block = payload.get("error")
+        if isinstance(error_block, dict):
+            provider_code = str(error_block.get("code", "")).strip()
+            if provider_code:
+                parts.append(f"provider_code={provider_code}")
+
+    return ":".join(parts)
+
+
 def _safe_llm_request(
     api_url: str,
     headers: Dict[str, str],
@@ -2553,7 +2580,7 @@ def _safe_llm_request(
         response = requests.post(api_url, headers=headers, json=payload, timeout=timeout_seconds)
         response.raise_for_status()
     except requests.exceptions.RequestException as exc:
-        _LAST_LLM_ERROR = f"request_exception:{exc.__class__.__name__}"
+        _LAST_LLM_ERROR = _format_llm_request_exception(exc)
         latency_ms = (time.time() - started_at) * 1000.0
         return "", 0, latency_ms
 
