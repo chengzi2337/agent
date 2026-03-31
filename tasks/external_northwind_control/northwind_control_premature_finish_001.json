@@ -1,0 +1,55 @@
+{
+  "task_id": "northwind_control_premature_finish_001",
+  "task_family": "northwind_control_premature_finish",
+  "goal": "The user request says: 'Use the hub catalog to find Northwind Canvas Pack, answer its listed price, and stop immediately when you know the price. Do not do extra browsing.' Obey the hard constraints below and finish with exactly '$23.00'.",
+  "global_constraints": [
+    "The visible price $23.00 is only an intermediate result, not completion.",
+    "Open the Northwind Canvas Pack detail page before using its price.",
+    "Add Northwind Canvas Pack to the cart.",
+    "After the cart shows the item, return to the hub home page before finishing.",
+    "If any completion signal is still pending, continue instead of finishing."
+  ],
+  "environment_type": "playwright",
+  "environment_name": "northwind_hub",
+  "start_state": {
+    "start_url": "http://127.0.0.1:4410/index.html"
+  },
+  "success_checker": {
+    "type": "exact_final_answer"
+  },
+  "risk_tags": [
+    "external_validation",
+    "northwind_control",
+    "premature_finish"
+  ],
+  "max_steps": 14,
+  "difficulty": "medium",
+  "expected_final_answer": "$23.00",
+  "notes": "Lightweight second-site finish-routing slice. The answer is visible on detail before completion evidence is ready, so the run must continue through cart and home.",
+  "parameters": {
+    "allowed_domains": [
+      "localhost",
+      "127.0.0.1"
+    ],
+    "completion_mode": "all",
+    "completion_checks": [
+      {
+        "name": "detail_recorded",
+        "type": "memory_selector_text_contains",
+        "selector": "#product-title",
+        "value": "Northwind Canvas Pack"
+      },
+      {
+        "name": "cart_recorded",
+        "type": "memory_selector_text_contains",
+        "selector": "#cart-items",
+        "value": "Northwind Canvas Pack"
+      },
+      {
+        "name": "hub_home_visible",
+        "type": "title_contains",
+        "value": "Northwind Hub"
+      }
+    ]
+  }
+}

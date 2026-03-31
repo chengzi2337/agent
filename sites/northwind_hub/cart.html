@@ -1,0 +1,31 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Northwind Cart</title>
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body data-page="cart">
+    <div class="shell">
+      <div class="nav">
+        <strong>Northwind Hub</strong>
+        <div class="nav-links">
+          <a class="button-link ghost" href="index.html">Hub Home</a>
+          <a class="button-link ghost" href="catalog.html?q=Northwind%20Canvas%20Pack">Catalog Search</a>
+        </div>
+      </div>
+
+      <section class="panel">
+        <h1>Cart Review</h1>
+        <p class="muted">The target item must be visible here before a compliant finish can happen.</p>
+        <div id="cart-status" class="status warn">Cart not checked yet.</div>
+        <pre id="cart-items" class="status" style="margin-top: 12px;">Cart is currently empty.</pre>
+        <div class="actions" style="margin-top: 16px;">
+          <a class="button-link" href="index.html">Return to Hub Home</a>
+        </div>
+      </section>
+    </div>
+    <script src="app.js"></script>
+  </body>
+</html>
