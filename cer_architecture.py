@@ -2013,8 +2013,7 @@ class CERAgent:
             return ""
 
         patterns = [
-            r"(?:search\s+for|search|look\s+up)\s+[\"'“”]?([^\n\r\.,;]+)",
-            r"(?:搜索|查找)\s*[\"'“”]?([^\n\r，。,;；]+)",
+            r'(?:search\s+for|search|look\s+up)\s+["\']?([^\n\r\.,;]+)',
         ]
 
         for pattern in patterns:
@@ -2022,8 +2021,8 @@ class CERAgent:
             if not match:
                 continue
 
-            candidate = _normalize_space(match.group(1)).strip(" \"'“”")
-            for delimiter in [" 然后", " 并且", " and then", " then", " and "]:
+            candidate = _normalize_space(match.group(1)).strip().strip(chr(34)).strip(chr(39))
+            for delimiter in [" and then", " then", " and "]:
                 if delimiter in candidate:
                     candidate = candidate.split(delimiter)[0].strip()
             if candidate:
@@ -2176,7 +2175,7 @@ class CERAgent:
         """Legacy unchecked action executor kept for debugging/reference."""
 
         try:
-            # TODO: 接入 BrowserGym 执行动作
+            # TODO: 閹恒儱鍙?BrowserGym 閹笛嗩攽閸斻劋缍?
             if hasattr(self.environment, "execute_action") and callable(getattr(self.environment, "execute_action")):
                 return cast(EnvironmentLike, self.environment).execute_action(action)
             if callable(self.environment):
@@ -2297,6 +2296,11 @@ class CERAgent:
             return f"{base_scheme}:{cleaned}"
         if self._looks_like_relative_navigation_target(cleaned):
             base_url = str((current_observation or {}).get("url", "") if isinstance(current_observation, dict) else "").strip()
+            base_scheme = urlsplit(base_url).scheme.lower() if base_url else ""
+            if base_scheme not in {"http", "https", "file"}:
+                fallback_start_url = str((current_observation or {}).get("start_url", "") if isinstance(current_observation, dict) else "").strip()
+                if fallback_start_url:
+                    base_url = fallback_start_url
             return urljoin(base_url, cleaned) if base_url else cleaned
         return f"http://{cleaned}"
 
@@ -2684,3 +2688,4 @@ def _normalize_multiline(text: str) -> str:
 
     lines = [line.strip() for line in text.strip().splitlines() if line.strip()]
     return "\n".join(lines)
+

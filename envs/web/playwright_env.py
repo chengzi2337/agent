@@ -86,6 +86,13 @@ class BenchmarkPlaywrightEnvironment(PlaywrightEnvironment):
                     result = {"done": False, "error": "goto action requires a URL."}
                 else:
                     normalized_url = self._normalize_navigation_url(page, url)
+                    if self._looks_like_relative_page_path(url):
+                        current_url = str(getattr(page, "url", "") or "").strip()
+                        current_scheme = urlsplit(current_url).scheme.lower()
+                        if current_scheme not in {"http", "https", "file"}:
+                            fallback_start_url = self._resolve_start_url(self.task_spec.get("start_state", {}))
+                            if fallback_start_url:
+                                normalized_url = urljoin(fallback_start_url, url)
                     page.goto(normalized_url, wait_until="domcontentloaded")
                     result = {"done": False, "observation": f"Navigated to: {normalized_url}"}
             elif action_type == "wait":
@@ -153,6 +160,7 @@ class BenchmarkPlaywrightEnvironment(PlaywrightEnvironment):
             observation_text = "<no-visible-interactive-elements>"
         self._last_observation_text = observation_text
 
+        start_url = self._resolve_start_url(self.task_spec.get("start_state", {}))
         merged: Dict[str, Any] = {
             "url": url,
             "title": title,
@@ -163,6 +171,7 @@ class BenchmarkPlaywrightEnvironment(PlaywrightEnvironment):
             "image_base64": "",
             "done": False,
             "task_family": str(self.task_spec.get("task_family", state.get("task_family", "playwright"))),
+            "start_url": start_url,
         }
         if isinstance(state, dict):
             for key, value in state.items():
@@ -663,4 +672,5 @@ class BenchmarkPlaywrightEnvironment(PlaywrightEnvironment):
             "evidence_ready": completion_ready,
             "completion_checks": results,
         }
+
 
