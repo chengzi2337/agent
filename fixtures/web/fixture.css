@@ -1,0 +1,102 @@
+:root {
+  --bg: #f4efe4;
+  --card: #fffaf2;
+  --ink: #1f2a2e;
+  --accent: #c45b3c;
+  --accent-soft: #f1d2c6;
+  --line: #d6c4ae;
+  --good: #2f6f4f;
+  --warn: #b35a1f;
+}
+* { box-sizing: border-box; }
+body {
+  margin: 0;
+  font-family: Georgia, "Times New Roman", serif;
+  background: linear-gradient(180deg, #f8f2e8 0%, #efe6d7 100%);
+  color: var(--ink);
+}
+header {
+  padding: 20px 24px 10px;
+  border-bottom: 1px solid var(--line);
+}
+main {
+  display: grid;
+  grid-template-columns: 280px 1fr;
+  gap: 20px;
+  padding: 20px 24px 32px;
+}
+aside, section {
+  background: var(--card);
+  border: 1px solid var(--line);
+  border-radius: 18px;
+  padding: 16px;
+  box-shadow: 0 8px 24px rgba(40, 28, 14, 0.08);
+}
+.status {
+  margin-top: 12px;
+  padding: 12px 14px;
+  border-radius: 14px;
+  background: #fff7ec;
+  border: 1px solid var(--line);
+  line-height: 1.45;
+}
+.grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 14px;
+  margin-top: 16px;
+}
+.card {
+  padding: 14px;
+  border-radius: 16px;
+  border: 1px solid var(--line);
+  background: #fffdf8;
+}
+button, a.fake-link {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 40px;
+  padding: 10px 14px;
+  border-radius: 999px;
+  border: 1px solid #b58872;
+  background: #fff;
+  color: #3d3029;
+  font: inherit;
+  text-decoration: none;
+  cursor: pointer;
+  margin: 6px 6px 0 0;
+}
+button.primary {
+  background: var(--accent);
+  color: white;
+  border-color: var(--accent);
+}
+button.safe {
+  background: #eef7f0;
+  border-color: #7aa287;
+}
+button.risky {
+  background: #fff0eb;
+  border-color: #d17052;
+}
+button.hidden {
+  display: none;
+}
+small.muted, p.muted, li.muted { color: #6f655d; }
+.badge {
+  display: inline-block;
+  margin-right: 8px;
+  padding: 4px 10px;
+  border-radius: 999px;
+  background: var(--accent-soft);
+  font-size: 12px;
+}
+pre.log {
+  white-space: pre-wrap;
+  background: #fbf6ee;
+  border: 1px dashed var(--line);
+  border-radius: 12px;
+  padding: 12px;
+  min-height: 88px;
+}

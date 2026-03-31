@@ -1,0 +1,32 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Northwind Catalog</title>
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body data-page="catalog">
+    <div class="shell">
+      <div class="nav">
+        <strong>Northwind Hub</strong>
+        <div class="nav-links">
+          <a class="button-link ghost" href="index.html">Hub Home</a>
+          <a class="button-link ghost" href="cart.html">Cart Review (<span id="nav-cart-count">0</span>)</a>
+        </div>
+      </div>
+
+      <section class="panel">
+        <h1>Catalog Search</h1>
+        <p class="muted">Only one live item is relevant for the control slice.</p>
+        <div class="actions">
+          <input id="catalog-query" type="text" placeholder="Search inventory" />
+          <button id="run-search">Run Search</button>
+        </div>
+        <div id="search-status" class="status warn">No search has been recorded yet.</div>
+        <div id="search-results" class="actions" style="margin-top: 14px;"></div>
+      </section>
+    </div>
+    <script src="app.js"></script>
+  </body>
+</html>

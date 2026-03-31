@@ -1,0 +1,11 @@
+{
+  "name": "repeat_constraints",
+  "description": "Legacy-style prompting but repeats constraints each step without structured slots.",
+  "use_isolation": false,
+  "repeat_constraints_each_step": true,
+  "history_mode": "full",
+  "action_history_limit": 8,
+  "enable_dead_end_memory": false,
+  "enable_finish_gate": false,
+  "enable_static_interceptor": false
+}

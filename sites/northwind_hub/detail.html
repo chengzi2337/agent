@@ -1,0 +1,36 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Northwind Canvas Pack</title>
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body data-page="detail">
+    <div class="shell">
+      <div class="nav">
+        <strong>Northwind Hub</strong>
+        <div class="nav-links">
+          <a class="button-link ghost" href="index.html">Hub Home</a>
+          <a class="button-link ghost" href="catalog.html?q=Northwind%20Canvas%20Pack">Back to Catalog</a>
+          <a class="button-link ghost" href="cart.html">Cart Review (<span id="nav-cart-count">0</span>)</a>
+        </div>
+      </div>
+
+      <section class="panel">
+        <h1 id="product-title">Northwind Canvas Pack</h1>
+        <p class="muted">Expedition-ready field pack with a lightweight control-friendly path.</p>
+        <div class="status">
+          Listed Price: <strong id="product-price">$23.00</strong>
+        </div>
+        <div class="actions" style="margin-top: 16px;">
+          <button id="add-to-cart">Add to Cart</button>
+          <a class="button-link alt" href="cart.html">Open Cart</a>
+        </div>
+        <div id="detail-status" class="status warn">Detail page opened. Cart update still pending.</div>
+        <div id="cart-preview" class="status" style="margin-top: 12px;"></div>
+      </section>
+    </div>
+    <script src="app.js"></script>
+  </body>
+</html>

@@ -1,0 +1,11 @@
+{
+  "name": "naive_summary",
+  "description": "Replace detailed history with a compact summary baseline.",
+  "use_isolation": false,
+  "repeat_constraints_each_step": false,
+  "history_mode": "summary",
+  "action_history_limit": 3,
+  "enable_dead_end_memory": false,
+  "enable_finish_gate": false,
+  "enable_static_interceptor": false
+}

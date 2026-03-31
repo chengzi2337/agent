@@ -1,10 +1,14 @@
 from __future__ import annotations
 
+import hashlib
 import json
+import os
 import re
+import sys
+import time
 from copy import deepcopy
 from typing import Any, Callable, Dict, List, Optional, Protocol, Tuple, TypedDict, cast
-from urllib.parse import unquote
+from urllib.parse import unquote, urljoin, urlsplit, urlunsplit
 
 import requests
 
@@ -53,6 +57,28 @@ class AgentAction(TypedDict, total=False):
     raw: str
 
 
+class ActionSecurityPolicy(TypedDict, total=False):
+    """Deterministic guardrail policy applied before environment execution."""
+
+    allowed_domains: List[str]
+    blocked_domains: List[str]
+    high_risk_keywords: List[str]
+    interactive_approval: bool
+
+
+class TargetMetadata(TypedDict, total=False):
+    """Environment-provided metadata for one actionable target."""
+
+    selector: str
+    role: str
+    text: str
+    aria_label: str
+    name: str
+    tag: str
+    type: str
+    title: str
+
+
 class EnvironmentLike(Protocol):
     """Protocol of an environment adapter used by CERAgent."""
 
@@ -80,6 +106,25 @@ class CERMemory:
         validated_name = self._validate_non_empty_text("name", name)
         validated_description = self._validate_non_empty_text("description", description)
         validated_usages = self._validate_non_empty_text("usages", usages)
+
+        canonical_url = self._canonicalize_url(validated_url)
+        for index, item in enumerate(self._dynamics):
+            if self._canonicalize_url(item["url"]) != canonical_url:
+                continue
+
+            merged_name = self._merge_prefer_informative(item["name"], validated_name)
+            merged_description = self._merge_unique_text(item["description"], validated_description)
+            merged_usages = self._merge_unique_text(item["usages"], validated_usages)
+
+            updated: DynamicEntry = {
+                "id": item["id"],
+                "url": item["url"],
+                "name": merged_name,
+                "description": merged_description,
+                "usages": merged_usages,
+            }
+            self._dynamics[index] = updated
+            return deepcopy(updated)
 
         entry: DynamicEntry = {
             "id": self._next_dynamic_id,
@@ -290,6 +335,64 @@ class CERMemory:
             raise ValueError(f"Field '{field_name}' cannot be empty.")
         return cleaned
 
+    @staticmethod
+    def _canonicalize_url(url: str) -> str:
+        """Canonicalize URL for duplicate detection."""
+
+        cleaned = url.strip()
+        if not cleaned:
+            return cleaned
+
+        try:
+            parsed = urlsplit(cleaned)
+        except Exception:
+            return cleaned.lower().rstrip("/")
+
+        scheme = (parsed.scheme or "https").lower()
+        netloc = parsed.netloc.lower()
+        path = parsed.path.rstrip("/")
+        query = parsed.query
+
+        canonical = urlunsplit((scheme, netloc, path, query, ""))
+        return canonical if canonical else cleaned.lower().rstrip("/")
+
+    @staticmethod
+    def _merge_unique_text(existing: str, incoming: str, separator: str = " | ", max_length: int = 1200) -> str:
+        """Merge text snippets while removing case-insensitive duplicates."""
+
+        left = existing.strip()
+        right = incoming.strip()
+        if not left:
+            return right[:max_length]
+        if not right:
+            return left[:max_length]
+
+        left_norm = left.lower()
+        right_norm = right.lower()
+        if left_norm == right_norm:
+            return left[:max_length]
+        if right_norm in left_norm:
+            return left[:max_length]
+        if left_norm in right_norm:
+            return right[:max_length]
+
+        merged = f"{left}{separator}{right}"
+        return merged[:max_length]
+
+    @staticmethod
+    def _merge_prefer_informative(existing: str, incoming: str) -> str:
+        """Prefer the longer informative name when duplicates are merged."""
+
+        left = existing.strip()
+        right = incoming.strip()
+        if not left:
+            return right
+        if not right:
+            return left
+        if len(right) > len(left):
+            return right
+        return left
+
 
 class CERDistiller:
     """Experience distiller that extracts dynamics/skills from trajectory.
@@ -346,6 +449,12 @@ class CERDistiller:
         if not llm_response.strip():
             return []
 
+        json_obj = _extract_first_json_object(llm_response)
+        if isinstance(json_obj, dict):
+            json_results = self._parse_dynamics_from_json_obj(json_obj)
+            if json_results:
+                return json_results
+
         try:
             blocks = re.findall(
                 r"<URL>\s*(.*?)\s*</URL>.*?<page-summary>\s*(.*?)\s*</page-summary>",
@@ -395,6 +504,47 @@ class CERDistiller:
         except Exception:
             return []
 
+    def _parse_dynamics_from_json_obj(self, payload: Dict[str, Any]) -> List[DynamicPayload]:
+        """Parse dynamics from JSON payload with flexible key shapes."""
+
+        keys = ["dynamics", "pages", "items", "results"]
+        records: Any = None
+        for key in keys:
+            candidate = payload.get(key)
+            if isinstance(candidate, list):
+                records = candidate
+                break
+
+        if records is None and all(k in payload for k in ("url", "name", "description", "usages")):
+            records = [payload]
+
+        if not isinstance(records, list):
+            return []
+
+        parsed_results: List[DynamicPayload] = []
+        for item in records:
+            if not isinstance(item, dict):
+                continue
+
+            url = _normalize_space(str(item.get("url", "")))
+            name = _normalize_space(str(item.get("name", item.get("title", ""))))
+            description = _normalize_space(str(item.get("description", item.get("summary", ""))))
+            usages = _normalize_space(str(item.get("usages", item.get("usage", ""))))
+
+            if not url or not name or not description or not usages:
+                continue
+
+            parsed_results.append(
+                {
+                    "url": url,
+                    "name": name,
+                    "description": description,
+                    "usages": usages,
+                }
+            )
+
+        return parsed_results
+
     def parse_skills(self, llm_response: str) -> List[SkillPayload]:
         """Parse skill records from XML-like text.
 
@@ -405,6 +555,12 @@ class CERDistiller:
 
         if not llm_response.strip():
             return []
+
+        json_obj = _extract_first_json_object(llm_response)
+        if isinstance(json_obj, dict):
+            json_results = self._parse_skills_from_json_obj(json_obj)
+            if json_results:
+                return json_results
 
         try:
             blocks = re.findall(
@@ -426,20 +582,48 @@ class CERDistiller:
         except Exception:
             return []
 
+    def _parse_skills_from_json_obj(self, payload: Dict[str, Any]) -> List[SkillPayload]:
+        """Parse skills from JSON payload with flexible key shapes."""
+
+        keys = ["skills", "items", "results"]
+        records: Any = None
+        for key in keys:
+            candidate = payload.get(key)
+            if isinstance(candidate, list):
+                records = candidate
+                break
+
+        if records is None and all(k in payload for k in ("name", "steps")):
+            records = [payload]
+
+        if not isinstance(records, list):
+            return []
+
+        parsed_results: List[SkillPayload] = []
+        for item in records:
+            if not isinstance(item, dict):
+                continue
+
+            name = _normalize_space(str(item.get("name", item.get("skill", ""))))
+            steps_raw = str(item.get("steps", item.get("procedure", "")))
+            steps = _normalize_multiline(steps_raw)
+            if not name or not steps:
+                continue
+            parsed_results.append({"name": name, "steps": steps})
+
+        return parsed_results
+
     def _build_dynamics_prompt(self, trajectory: str) -> str:
         return (
-            "Extract Dynamics from trajectory. Output each record in the exact format:\n"
-            "<URL>...</URL>\n"
-            "<think>...</think>\n"
-            "<page-summary>Name: ...\nDescription: ...\nUsages: ...</page-summary>\n\n"
+            "Extract dynamics from trajectory and return JSON only (no markdown).\n"
+            "Schema: {\"dynamics\":[{\"url\":\"...\",\"name\":\"...\",\"description\":\"...\",\"usages\":\"...\"}]}.\n"
             f"Trajectory:\n{trajectory}"
         )
 
     def _build_skills_prompt(self, trajectory: str) -> str:
         return (
-            "Extract reusable skills from trajectory. Output each record in the exact format:\n"
-            "<skill>skill name</skill>\n"
-            "<steps>step 1 ... step 2 ...</steps>\n\n"
+            "Extract reusable skills from trajectory and return JSON only (no markdown).\n"
+            "Schema: {\"skills\":[{\"name\":\"...\",\"steps\":\"step1\\nstep2\"}]}.\n"
             f"Trajectory:\n{trajectory}"
         )
 
@@ -452,7 +636,8 @@ class CERDistiller:
         payload: Dict[str, Any] = {"prompt": prompt}
         if self.model:
             payload["model"] = self.model
-        return _safe_llm_request(self.api_url, self.headers, payload)
+        extracted_text, _, _ = _safe_llm_request(self.api_url, self.headers, payload)
+        return extracted_text
 
 
 class CERRetriever:
@@ -539,6 +724,12 @@ class CERRetriever:
         if not llm_response.strip():
             return []
 
+        json_obj = _extract_first_json_object(llm_response)
+        if isinstance(json_obj, dict):
+            json_ids = self._parse_selected_ids_from_json_obj(json_obj)
+            if json_ids:
+                return json_ids
+
         try:
             selected_sections = re.findall(
                 r"<selected-(?:pages|skills)>\s*(.*?)\s*</selected-(?:pages|skills)>",
@@ -558,6 +749,39 @@ class CERRetriever:
         except Exception:
             return []
 
+    def _parse_selected_ids_from_json_obj(self, payload: Dict[str, Any]) -> List[int]:
+        """Parse selected IDs from JSON payload with flexible key names."""
+
+        candidate_lists: List[Any] = []
+        for key in ("selected_ids", "ids", "selected", "selected_pages", "selected_skills"):
+            value = payload.get(key)
+            if isinstance(value, list):
+                candidate_lists.append(value)
+
+        if not candidate_lists:
+            return []
+
+        ids: List[int] = []
+        for items in candidate_lists:
+            for value in items:
+                parsed_id: Optional[int] = None
+                if isinstance(value, int):
+                    parsed_id = value
+                elif isinstance(value, str) and value.strip().isdigit():
+                    parsed_id = int(value.strip())
+                elif isinstance(value, dict):
+                    raw_id = value.get("id")
+                    if isinstance(raw_id, int):
+                        parsed_id = raw_id
+                    elif isinstance(raw_id, str) and raw_id.strip().isdigit():
+                        parsed_id = int(raw_id.strip())
+
+                if parsed_id is None or parsed_id <= 0:
+                    continue
+                if parsed_id not in ids:
+                    ids.append(parsed_id)
+        return ids
+
     def _build_dynamic_retrieval_prompt(self, task_goal: str, candidates: List[DynamicEntry]) -> str:
         candidate_lines = [
             (
@@ -570,8 +794,8 @@ class CERRetriever:
         return (
             f"Task goal: {task_goal}\n"
             f"Select up to {self.k_d} most relevant pages by ID only.\n"
-            "Output must be wrapped in <selected-pages>...</selected-pages>.\n"
-            "Use lines formatted as: id: N; name: ...\n\n"
+            "Return JSON only (no markdown).\n"
+            "Schema: {\"selected_ids\":[1,2,3]}.\n\n"
             f"Candidates:\n{candidate_text}"
         )
 
@@ -583,8 +807,8 @@ class CERRetriever:
         return (
             f"Task goal: {task_goal}\n"
             f"Select up to {self.k_s} most relevant skills by ID only.\n"
-            "Output must be wrapped in <selected-skills>...</selected-skills>.\n"
-            "Use lines formatted as: id: N; name: ...\n\n"
+            "Return JSON only (no markdown).\n"
+            "Schema: {\"selected_ids\":[1,2,3]}.\n\n"
             f"Candidates:\n{candidate_text}"
         )
 
@@ -597,7 +821,8 @@ class CERRetriever:
         payload: Dict[str, Any] = {"prompt": prompt}
         if self.model:
             payload["model"] = self.model
-        return _safe_llm_request(self.api_url, self.headers, payload)
+        extracted_text, _, _ = _safe_llm_request(self.api_url, self.headers, payload)
+        return extracted_text
 
 
 class CERAgent:
@@ -618,6 +843,14 @@ class CERAgent:
         llm_empty_retry: int = 1,
         prompt_observation_line_limit: int = 30,
         prompt_observation_char_limit: int = 4000,
+        security_policy: Optional[ActionSecurityPolicy] = None,
+        repeat_constraints_each_step: bool = False,
+        history_mode: str = "full",
+        action_history_limit: int = 8,
+        enable_finish_gate: bool = True,
+        enable_static_interceptor: bool = True,
+        enable_dead_end_memory: bool = True,
+        dead_end_limit: int = 8,
     ) -> None:
         if max_steps <= 0:
             raise ValueError("max_steps must be positive.")
@@ -627,6 +860,12 @@ class CERAgent:
             raise ValueError("prompt_observation_line_limit must be positive.")
         if prompt_observation_char_limit <= 0:
             raise ValueError("prompt_observation_char_limit must be positive.")
+        if history_mode not in {"full", "summary"}:
+            raise ValueError("history_mode must be 'full' or 'summary'.")
+        if action_history_limit <= 0:
+            raise ValueError("action_history_limit must be positive.")
+        if dead_end_limit <= 0:
+            raise ValueError("dead_end_limit must be positive.")
 
         self.memory = memory
         self.distiller = distiller
@@ -641,8 +880,45 @@ class CERAgent:
         self.llm_empty_retry = llm_empty_retry
         self.prompt_observation_line_limit = prompt_observation_line_limit
         self.prompt_observation_char_limit = prompt_observation_char_limit
+        self.security_policy = security_policy or {}
+        self.repeat_constraints_each_step = repeat_constraints_each_step
+        self.history_mode = history_mode
+        self.action_history_limit = action_history_limit
+        self.enable_finish_gate = enable_finish_gate
+        self.enable_static_interceptor = enable_static_interceptor
+        self.enable_dead_end_memory = enable_dead_end_memory
+        self.dead_end_limit = dead_end_limit
+        self.global_constraints: str = ""
+        self.total_tokens: int = 0
+        self.total_latency: float = 0.0
 
-    def run_task(self, task_goal: str) -> Dict[str, Any]:
+    def set_global_constraints(self, text: str) -> None:
+        """Set the current top-priority constraint block."""
+
+        self.global_constraints = text.strip()
+
+    def replace_global_constraints(self, text: str) -> None:
+        """Replace the current top-priority constraint block."""
+
+        self.set_global_constraints(text)
+
+    def append_global_constraint(self, text: str) -> None:
+        """Append one more top-priority constraint line."""
+
+        addition = text.strip()
+        if not addition:
+            return
+        if not self.global_constraints:
+            self.global_constraints = addition
+            return
+        self.global_constraints = f"{self.global_constraints}\n{addition}"
+
+    def run_task(
+        self,
+        task_goal: str,
+        global_constraints: str = "",
+        use_isolation: bool = True,
+    ) -> Dict[str, Any]:
         """Run one complete CER task pipeline.
 
         Pipeline:
@@ -656,6 +932,12 @@ class CERAgent:
         normalized_goal = task_goal.strip()
         if not normalized_goal:
             raise ValueError("task_goal cannot be empty.")
+
+        if global_constraints.strip():
+            self.replace_global_constraints(global_constraints)
+
+        self.total_tokens = 0
+        self.total_latency = 0.0
 
         selected_dynamics, selected_skills = self.retriever.retrieve(normalized_goal)
         memory_text = self._format_experience_as_nl(selected_dynamics, selected_skills)
@@ -678,14 +960,37 @@ class CERAgent:
 
             step += 1
             current_observation = self._get_environment_observation()
-            observation_text = str(current_observation.get("observation_text", "")).strip()
-            prompt = self._build_agent_prompt(composed_context, trajectory, step, observation_text)
+            termination_routing = self._build_termination_routing_state(
+                task_goal=normalized_goal,
+                step=step,
+                current_observation=current_observation,
+                trajectory=trajectory,
+            )
+            prompt = self._build_agent_prompt(
+                composed_context,
+                trajectory,
+                step,
+                current_observation,
+                self.global_constraints,
+                termination_routing,
+                use_isolation=use_isolation,
+            )
+            prompt_metadata = self._build_prompt_metadata(
+                prompt=prompt,
+                observation=current_observation,
+                trajectory=trajectory,
+                global_constraints=self.global_constraints,
+                termination_routing=termination_routing,
+                use_isolation=use_isolation,
+            )
             llm_output = ""
             llm_retries = 0
             llm_error = "unknown"
 
             while True:
-                llm_output = self._call_llm_api(prompt)
+                llm_output, token_count, latency_ms = self._call_agent_llm(prompt, current_observation)
+                self.total_tokens += token_count
+                self.total_latency += latency_ms
                 if llm_output:
                     break
 
@@ -715,6 +1020,9 @@ class CERAgent:
                     "llm_error": llm_error,
                     "llm_retries": llm_retries,
                     "pre_observation": current_observation,
+                    "prompt": prompt,
+                    "prompt_metadata": prompt_metadata,
+                    "termination_routing": termination_routing,
                 }
 
                 if done_by_observation:
@@ -727,7 +1035,57 @@ class CERAgent:
                 break
 
             action = self._parse_action(llm_output)
+            state_signature_before = self._get_environment_state_signature(current_observation)
             if action.get("type") == "finish":
+                if self.enable_finish_gate:
+                    allow_finish, finish_reason, termination_routing = self._should_accept_finish_action(
+                        task_goal=normalized_goal,
+                        step=step,
+                        current_observation=current_observation,
+                        trajectory=trajectory,
+                        termination_routing=termination_routing,
+                    )
+                    finish_gate_result: Dict[str, Any] = {
+                        "enabled": True,
+                        "allowed": allow_finish,
+                        "reason": finish_reason,
+                        "route": termination_routing.get("route", ""),
+                    }
+                else:
+                    allow_finish = True
+                    finish_reason = "finish_gate_disabled"
+                    finish_gate_result = {
+                        "enabled": False,
+                        "allowed": True,
+                        "reason": finish_reason,
+                        "route": termination_routing.get("route", ""),
+                    }
+                if not allow_finish:
+                    if self.trace_enabled:
+                        print(
+                            f"[TRACE] step={step} finish_rejected "
+                            f"reason={finish_reason} pre_obs={self._observation_preview(current_observation)}"
+                        )
+                    trajectory.append(
+                        {
+                            "step": step,
+                            "llm_output": llm_output,
+                            "action": action,
+                            "pre_observation": current_observation,
+                            "prompt": prompt,
+                            "prompt_metadata": prompt_metadata,
+                            "termination_routing": termination_routing,
+                            "finish_rejected": True,
+                            "finish_reject_reason": finish_reason,
+                            "finish_gate_result": finish_gate_result,
+                            "observation": "Model finish rejected due to insufficient completion evidence.",
+                            "state_signature_before": state_signature_before,
+                            "state_signature_after": state_signature_before,
+                            "state_changed": False,
+                        }
+                    )
+                    continue
+
                 success = True
                 final_answer = action.get("content", "")
                 if self.trace_enabled:
@@ -741,13 +1099,40 @@ class CERAgent:
                         "llm_output": llm_output,
                         "action": action,
                         "pre_observation": current_observation,
+                        "prompt": prompt,
+                        "prompt_metadata": prompt_metadata,
+                        "termination_routing": termination_routing,
+                        "finish_gate_result": finish_gate_result,
                         "observation": "Task marked completed by model.",
+                        "state_signature_before": state_signature_before,
+                        "state_signature_after": state_signature_before,
+                        "state_changed": False,
                     }
                 )
                 break
 
-            env_result = self._execute_action(action)
+            violation_error = self._evaluate_security_policy(action, current_observation) if self.enable_static_interceptor else None
+            if violation_error is not None:
+                interceptor_result = {
+                    "enabled": True,
+                    "blocked": True,
+                    "block_reason": violation_error,
+                    "risk_class": "static_policy_violation",
+                }
+                env_result = {
+                    "done": False,
+                    "error": violation_error,
+                }
+            else:
+                interceptor_result = {
+                    "enabled": self.enable_static_interceptor,
+                    "blocked": False,
+                    "block_reason": "",
+                    "risk_class": "",
+                }
+                env_result = self._execute_action(action, current_observation=current_observation)
             post_observation = self._get_environment_observation()
+            state_signature_after = self._get_environment_state_signature(post_observation)
             if self.trace_enabled:
                 self._print_action_observation_trace(step, action, current_observation, post_observation, env_result)
 
@@ -757,7 +1142,20 @@ class CERAgent:
                 "action": action,
                 "pre_observation": current_observation,
                 "post_observation": post_observation,
+                "prompt": prompt,
+                "prompt_metadata": prompt_metadata,
+                "termination_routing": termination_routing,
+                "finish_gate_result": {
+                    "enabled": self.enable_finish_gate,
+                    "allowed": True,
+                    "reason": "not_finish_action",
+                    "route": termination_routing.get("route", ""),
+                },
+                "interceptor_result": interceptor_result,
                 "observation": env_result,
+                "state_signature_before": state_signature_before,
+                "state_signature_after": state_signature_after,
+                "state_changed": state_signature_before != state_signature_after,
             }
             trajectory.append(step_event)
 
@@ -814,8 +1212,273 @@ class CERAgent:
             "selected_skill_ids": [item["id"] for item in selected_skills],
             "persisted_dynamic_ids": persisted_dynamic_ids,
             "persisted_skill_ids": persisted_skill_ids,
+            "total_tokens": self.total_tokens,
+            "total_latency": self.total_latency,
             "trajectory": trajectory,
         }
+
+    def _should_accept_finish_action(
+        self,
+        task_goal: str,
+        step: int,
+        current_observation: Dict[str, Any],
+        trajectory: List[Dict[str, Any]],
+        termination_routing: Optional[Dict[str, Any]] = None,
+    ) -> Tuple[bool, str, Dict[str, Any]]:
+        """Gate model-proposed finish using explicit termination-routing evidence."""
+
+        routing = termination_routing or self._build_termination_routing_state(
+            task_goal=task_goal,
+            step=step,
+            current_observation=current_observation,
+            trajectory=trajectory,
+        )
+        route = str(routing.get("route", "CONTINUE")).strip().upper() or "CONTINUE"
+        cannot_conclude_reason = str(routing.get("cannot_conclude_reason", "")).strip()
+
+        if route == "CONCLUDE":
+            satisfied_evidence = routing.get("satisfied_evidence", [])
+            if isinstance(satisfied_evidence, list) and satisfied_evidence:
+                evidence_label = str(satisfied_evidence[0]).strip()
+            else:
+                evidence_label = "termination_routing"
+            return True, f"routing_conclude:{evidence_label}", routing
+
+        if step <= 1 and route != "CONCLUDE":
+            if not cannot_conclude_reason:
+                cannot_conclude_reason = "step_too_early_without_evidence"
+            routing["cannot_conclude_reason"] = cannot_conclude_reason
+
+        reason = cannot_conclude_reason or "completion_evidence_missing"
+        return False, f"routing_{route.lower()}:{reason}", routing
+
+    def _build_termination_routing_state(
+        self,
+        task_goal: str,
+        step: int,
+        current_observation: Dict[str, Any],
+        trajectory: List[Dict[str, Any]],
+    ) -> Dict[str, Any]:
+        """Summarize whether the agent should continue, revise, conclude, or stay blocked."""
+
+        satisfied_evidence, missing_evidence = self._extract_termination_evidence_from_observation(
+            current_observation
+        )
+        recent_failure_events = self._collect_recent_failure_events(trajectory)
+        done_by_observation, _, completion_reason = self._infer_completion_from_observation(
+            task_goal,
+            current_observation,
+        )
+        if done_by_observation:
+            satisfied_evidence.append(f"observation_completion:{completion_reason}")
+
+        unique_satisfied = list(dict.fromkeys(item for item in satisfied_evidence if str(item).strip()))
+        unique_missing = list(dict.fromkeys(item for item in missing_evidence if str(item).strip()))
+        completion_ready = any(
+            item in {"completion_ready", "goal_ready", "evidence_ready"}
+            or str(item).startswith("observation_completion:")
+            for item in unique_satisfied
+        )
+        blocked_recently = any(
+            str(item.get("kind", "")).strip().lower() in {"blocked_action", "finish_rejected"}
+            for item in recent_failure_events
+            if isinstance(item, dict)
+        )
+        revise_needed = any(
+            str(item.get("kind", "")).strip().lower() in {"execution_error", "no_progress"}
+            for item in recent_failure_events
+            if isinstance(item, dict)
+        )
+
+        if completion_ready and not unique_missing:
+            route = "CONCLUDE"
+            cannot_conclude_reason = ""
+        elif blocked_recently:
+            route = "BLOCK"
+            cannot_conclude_reason = self._compose_cannot_conclude_reason(unique_missing, recent_failure_events)
+        elif revise_needed:
+            route = "REVISE"
+            cannot_conclude_reason = self._compose_cannot_conclude_reason(unique_missing, recent_failure_events)
+        else:
+            route = "CONTINUE"
+            cannot_conclude_reason = self._compose_cannot_conclude_reason(unique_missing, recent_failure_events)
+
+        return {
+            "route": route,
+            "step": step,
+            "satisfied_evidence": unique_satisfied,
+            "missing_evidence": unique_missing,
+            "recent_failure_events": recent_failure_events,
+            "cannot_conclude_reason": cannot_conclude_reason,
+        }
+
+    def _extract_termination_evidence_from_observation(
+        self,
+        observation: Dict[str, Any],
+    ) -> Tuple[List[str], List[str]]:
+        """Extract structured completion evidence and blockers from the current observation."""
+
+        satisfied: List[str] = []
+        missing: List[str] = []
+        modes = {
+            str(item).strip().lower()
+            for item in observation.get("modes", [])
+            if str(item).strip()
+        }
+        task_family = str(observation.get("task_family", "")).strip().lower()
+
+        def add_flag(
+            key: str,
+            label: str,
+            require: bool = True,
+        ) -> None:
+            if key not in observation and not require:
+                return
+            if bool(observation.get(key, False)):
+                satisfied.append(label)
+            else:
+                missing.append(label)
+
+        add_flag("completion_ready", "completion_ready", require=False)
+        add_flag("goal_ready", "goal_ready", require=False)
+        add_flag("evidence_ready", "evidence_ready", require=False)
+
+        if "dead_end_cleared" in observation and ("dead_end" in modes or "dead_end" in task_family):
+            add_flag("dead_end_cleared", "dead_end_cleared")
+        if "safe_review_complete" in observation and ("risk" in modes or "risk" in task_family or "unsafe" in task_family):
+            add_flag("safe_review_complete", "safe_review_complete")
+        selected_route = str(observation.get("selected_route", "")).strip()
+        if bool(observation.get("choice_required", False)) and not selected_route:
+            missing.append("route_selection_pending")
+        if selected_route:
+            satisfied.append("route_selected")
+
+        return satisfied, missing
+
+    def _collect_recent_failure_events(
+        self,
+        trajectory: List[Dict[str, Any]],
+        max_items: int = 3,
+    ) -> List[Dict[str, str]]:
+        """Collect recent blocked / failed / no-progress signals for routing decisions."""
+
+        step_events = [item for item in trajectory if isinstance(item, dict) and "step" in item]
+        recent_failures: List[Dict[str, str]] = []
+        seen_signatures: set[Tuple[str, str]] = set()
+
+        for event in reversed(step_events):
+            failure: Optional[Dict[str, str]] = None
+            action_obj = event.get("action")
+            action_type = ""
+            action_target = ""
+            if isinstance(action_obj, dict):
+                action_type = str(action_obj.get("type", "")).strip().lower()
+                action_target = str(action_obj.get("target", "")).strip()
+
+            if bool(event.get("finish_rejected")):
+                finish_reason = str(event.get("finish_reject_reason", "")).strip() or "finish_rejected"
+                failure = {
+                    "kind": "finish_rejected",
+                    "reason": finish_reason,
+                    "text": f"Finish was rejected: {finish_reason}.",
+                }
+            else:
+                interceptor_result = event.get("interceptor_result")
+                if isinstance(interceptor_result, dict) and bool(interceptor_result.get("blocked", False)):
+                    block_reason = str(interceptor_result.get("block_reason", "")).strip() or "blocked_action"
+                    failure = {
+                        "kind": "blocked_action",
+                        "reason": block_reason,
+                        "text": f"Action {action_type or 'unknown'} {self._render_dead_end_target(action_target)} was blocked: {block_reason}.",
+                    }
+                else:
+                    observation = event.get("observation")
+                    if isinstance(observation, dict):
+                        env_error = str(observation.get("error", "")).strip()
+                        if env_error:
+                            failure = {
+                                "kind": "execution_error",
+                                "reason": env_error,
+                                "text": f"Action {action_type or 'unknown'} {self._render_dead_end_target(action_target)} errored: {env_error}.",
+                            }
+                    if failure is None and action_type in {"click", "press", "goto", "type", "fill"}:
+                        if not bool(event.get("state_changed", True)):
+                            failure = {
+                                "kind": "no_progress",
+                                "reason": "no_state_change",
+                                "text": f"Action {action_type} {self._render_dead_end_target(action_target)} made no state progress.",
+                            }
+
+            if failure is None:
+                continue
+
+            signature = (failure["kind"], failure["reason"])
+            if signature in seen_signatures:
+                continue
+            seen_signatures.add(signature)
+            recent_failures.append(failure)
+            if len(recent_failures) >= max_items:
+                break
+
+        recent_failures.reverse()
+        return recent_failures
+
+    @staticmethod
+    def _compose_cannot_conclude_reason(
+        missing_evidence: List[str],
+        recent_failure_events: List[Dict[str, str]],
+    ) -> str:
+        """Explain why the task should not conclude yet."""
+
+        reason_parts: List[str] = []
+        if missing_evidence:
+            reason_parts.append(f"missing evidence: {', '.join(missing_evidence)}")
+        if recent_failure_events:
+            latest = recent_failure_events[-1]
+            latest_text = str(latest.get("text", "")).strip()
+            if latest_text:
+                reason_parts.append(f"latest blocker: {latest_text}")
+        if not reason_parts:
+            return "completion evidence is still insufficient"
+        return "; ".join(reason_parts)
+
+    @staticmethod
+    def _format_termination_routing_for_prompt(termination_routing: Dict[str, Any]) -> str:
+        """Serialize termination-routing evidence into a prompt slot."""
+
+        route = str(termination_routing.get("route", "CONTINUE")).strip().upper() or "CONTINUE"
+        satisfied = termination_routing.get("satisfied_evidence", [])
+        missing = termination_routing.get("missing_evidence", [])
+        recent_failures = termination_routing.get("recent_failure_events", [])
+        cannot_conclude_reason = str(termination_routing.get("cannot_conclude_reason", "")).strip() or "None"
+
+        def render_lines(title: str, items: Any) -> List[str]:
+            lines = [title]
+            if not isinstance(items, list) or not items:
+                lines.append("- None")
+                return lines
+            for item in items:
+                if isinstance(item, dict):
+                    lines.append(f"- {str(item.get('text', '')).strip() or json.dumps(item, ensure_ascii=True)}")
+                else:
+                    lines.append(f"- {str(item).strip()}")
+            return lines
+
+        route_guidance = {
+            "CONCLUDE": "Completion evidence is sufficient. Finish is allowed.",
+            "BLOCK": "A recent action was blocked or rejected. Do not conclude yet; choose a safer alternative.",
+            "REVISE": "The recent path did not make progress. Revise the plan before concluding.",
+            "CONTINUE": "Evidence is still incomplete. Continue gathering the required signals.",
+        }
+        lines = [
+            f"Recommended control route: {route}",
+            route_guidance.get(route, "Evidence is incomplete. Continue carefully."),
+            *render_lines("Satisfied evidence:", satisfied),
+            *render_lines("Missing evidence:", missing),
+            *render_lines("Recent failure / blocked events:", recent_failures),
+            f"Why you cannot conclude: {cannot_conclude_reason}",
+        ]
+        return "\n".join(lines)
 
     def _format_experience_as_nl(
         self,
@@ -855,33 +1518,116 @@ class CERAgent:
         composed_context: str,
         trajectory: List[Dict[str, Any]],
         step: int,
-        observation_text: str,
+        observation: Dict[str, Any],
+        global_constraints: str,
+        termination_routing: Dict[str, Any],
+        use_isolation: bool = True,
     ) -> str:
         """Build iterative prompt for action generation."""
 
-        recent_trajectory = trajectory[-5:]
-        trajectory_text = json.dumps(recent_trajectory, ensure_ascii=True)
-        observation_block = self._format_observation_for_prompt(observation_text)
-        return (
-            f"Step: {step}\n"
-            f"{composed_context}\n\n"
-            "Current Observation:\n"
-            f"{observation_block}\n\n"
-            "Policy (must follow):\n"
-            "- Decide the next single action ONLY based on Task Goal + Current Observation.\n"
-            "- Prefer Observation IDs from the list (e.g. [12]) for <target>.\n"
-            "- Use raw CSS selector only if no suitable Observation ID exists.\n"
-            "- For navigation, output <action>goto</action><url>https://...</url>.\n"
-            "- For text input, output <action>type</action><target>[id]</target><value>...</value>.\n"
-            "- For keyboard submit, output <action>press</action><target>[id]</target><value>Enter</value>.\n"
-            "- When task is complete, output <final-answer>...</final-answer>.\n\n"
-            "Recent Trajectory (JSON):\n"
-            f"{trajectory_text}\n\n"
-            "Respond with exactly one action block or one final-answer block.\n"
+        if self.history_mode == "summary":
+            recent_action_history = self._summarize_action_history_for_prompt(trajectory)
+        else:
+            recent_action_history = self._build_action_history_for_prompt(
+                trajectory,
+                max_items=self.action_history_limit,
+            )
+        dead_end_lines = (
+            self._build_dead_end_memory_for_prompt(trajectory)
+            if self.enable_dead_end_memory
+            else []
+        )
+        if use_isolation:
+            prompt_action_history = recent_action_history
+        else:
+            legacy_constraints = global_constraints.strip()
+            prompt_action_history = recent_action_history
+            if legacy_constraints:
+                legacy_seed = {
+                    "step": 0,
+                    "action": "GLOBAL_CONSTRAINTS",
+                    "target": "",
+                    "value": legacy_constraints,
+                    "done": False,
+                    "error": "",
+                }
+                prompt_action_history = [legacy_seed, *recent_action_history][-8:]
+
+        trajectory_text = json.dumps(prompt_action_history, ensure_ascii=True)
+        global_state_text = self._build_global_state_for_prompt(composed_context)
+        observation_block = self._format_observation_for_prompt(observation)
+        termination_routing_block = self._format_termination_routing_for_prompt(termination_routing)
+        prompt_prefix = (
+            f"Step: {step}\n\n"
+            "<Critical_Task_Constraints>\n"
+            "- Output MUST be exactly one JSON object, with no markdown code fence.\n"
+            "- Decide one next action ONLY from: goto, type, fill, click, press, wait, finish.\n"
+            "- Prefer observation IDs as target (e.g. [12]).\n"
+            "- Keep URL in field 'url' for goto action.\n"
+            "- Keep final completion text in field 'final_answer' for finish action.\n"
+            "- Do NOT use finish unless completion is verifiable from observation evidence.\n"
+            "- JSON schema: {\"action\": str, \"target\": str, \"value\": str, \"url\": str, \"final_answer\": str}.\n"
+            "- Leave irrelevant fields as empty string.\n"
+            "</Critical_Task_Constraints>\n\n"
         )
 
-    def _format_observation_for_prompt(self, observation_text: str) -> str:
-        """Truncate oversized observation text to keep prompts stable."""
+        global_state_block = (
+            "<Global_State>\n"
+            f"{global_state_text}\n"
+            "</Global_State>\n\n"
+            "<Current_Observation>\n"
+            f"{observation_block}\n"
+            "</Current_Observation>\n\n"
+            "<Action_History_JSON>\n"
+            f"{trajectory_text}\n\n"
+            "</Action_History_JSON>\n\n"
+            "Return exactly one JSON object only.\n"
+        )
+        repeated_constraints_block = ""
+        if self.repeat_constraints_each_step and global_constraints.strip():
+            repeated_constraints_block = (
+                "<Repeated_Global_Constraints>\n"
+                f"{global_constraints.strip()}\n"
+                "</Repeated_Global_Constraints>\n\n"
+            )
+
+        if use_isolation:
+            constraints_block = global_constraints.strip() if global_constraints.strip() else "None"
+            return (
+                prompt_prefix
+                + "<User_Global_Constraints>\n"
+                + "The following constraints are CRITICAL and must be strictly followed regardless of the action history:\n"
+                + f"{constraints_block}\n"
+                + "</User_Global_Constraints>\n\n"
+                + repeated_constraints_block
+                + "<Explored_Dead_Ends>\n"
+                + self._format_dead_ends_for_prompt(dead_end_lines)
+                + "\n</Explored_Dead_Ends>\n\n"
+                + "<Termination_Routing>\n"
+                + termination_routing_block
+                + "\n</Termination_Routing>\n\n"
+                + global_state_block
+            )
+
+        return (
+            prompt_prefix
+            + repeated_constraints_block
+            + "<Termination_Routing>\n"
+            + termination_routing_block
+            + "\n</Termination_Routing>\n\n"
+            + global_state_block
+        )
+
+    def _format_observation_for_prompt(self, observation: Dict[str, Any] | str) -> str:
+        """Format structured observation into a prompt-sized textual block."""
+
+        if isinstance(observation, dict):
+            a11y_nodes = observation.get("a11y_nodes")
+            if isinstance(a11y_nodes, list) and a11y_nodes:
+                return self._format_a11y_observation_for_prompt(a11y_nodes)
+            observation_text = str(observation.get("observation_text", "")).strip()
+        else:
+            observation_text = str(observation).strip()
 
         cleaned = observation_text.strip()
         if not cleaned:
@@ -891,7 +1637,14 @@ class CERAgent:
         if not lines:
             return "No environment observation available."
 
-        selected_lines = lines[: self.prompt_observation_line_limit]
+        scored_lines: List[Tuple[int, int, str]] = []
+        for index, line in enumerate(lines):
+            scored_lines.append((self._score_observation_line(line), index, line))
+
+        scored_lines.sort(key=lambda item: (-item[0], item[1]))
+        selected_candidates = scored_lines[: self.prompt_observation_line_limit]
+        selected_candidates.sort(key=lambda item: item[1])
+        selected_lines = [item[2] for item in selected_candidates]
         clipped_text = "\n".join(selected_lines)
 
         char_truncated = False
@@ -905,6 +1658,298 @@ class CERAgent:
         if char_truncated:
             clipped_text = f"{clipped_text}\n... (truncated for prompt size)"
         return clipped_text
+
+    def _format_a11y_observation_for_prompt(self, a11y_nodes: List[Dict[str, Any]]) -> str:
+        """Rank and clip structured accessibility nodes for prompting."""
+
+        if not a11y_nodes:
+            return "No environment observation available."
+
+        scored_nodes: List[Tuple[int, int, Dict[str, Any]]] = []
+        for index, node in enumerate(a11y_nodes):
+            if not isinstance(node, dict):
+                continue
+            scored_nodes.append((self._score_a11y_node(node), index, node))
+
+        scored_nodes.sort(key=lambda item: (-item[0], item[1]))
+        selected_candidates = scored_nodes[: self.prompt_observation_line_limit]
+        selected_candidates.sort(key=lambda item: item[1])
+
+        lines: List[str] = []
+        for _, _, node in selected_candidates:
+            node_id = node.get("id", "?")
+            role = str(node.get("role", "element")).strip() or "element"
+            name = str(node.get("text", node.get("name", ""))).strip() or "<no-name>"
+            selector = str(node.get("selector", "")).strip()
+            disabled = bool(node.get("disabled", False))
+            hidden = bool(node.get("hidden", False))
+            status_parts: List[str] = []
+            if disabled:
+                status_parts.append("disabled")
+            if hidden:
+                status_parts.append("hidden")
+            status_suffix = f" [{' '.join(status_parts)}]" if status_parts else ""
+            selector_suffix = f" selector='{selector}'" if selector else ""
+            lines.append(f"[{node_id}] {role} '{name}'{selector_suffix}{status_suffix}")
+
+        clipped_text = "\n".join(lines)
+        char_truncated = False
+        if len(clipped_text) > self.prompt_observation_char_limit:
+            clipped_text = clipped_text[: self.prompt_observation_char_limit].rstrip()
+            char_truncated = True
+
+        omitted_count = max(len(a11y_nodes) - len(selected_candidates), 0)
+        if omitted_count > 0:
+            clipped_text = f"{clipped_text}\n... (+{omitted_count} more accessibility nodes omitted)"
+        if char_truncated:
+            clipped_text = f"{clipped_text}\n... (truncated for prompt size)"
+        return clipped_text
+
+    @staticmethod
+    def _score_a11y_node(node: Dict[str, Any]) -> int:
+        """Score one accessibility node by task relevance."""
+
+        role = str(node.get("role", "")).lower()
+        text = str(node.get("text", node.get("name", ""))).lower()
+        score = 0
+
+        if role == "textbox":
+            score += 140
+        if role in {"searchbox", "combobox"}:
+            score += 130
+        if role in {"button", "link"}:
+            score += 100
+        if role in {"checkbox", "radio", "tab", "menuitem"}:
+            score += 80
+        if "search" in text:
+            score += 20
+        if "submit" in text or "confirm" in text:
+            score += 10
+        return score
+
+    @staticmethod
+    def _score_observation_line(line: str) -> int:
+        """Score one observation line by interaction importance."""
+
+        normalized = line.lower()
+        score = 0
+
+        if "textarea" in normalized:
+            score += 120
+        if "input" in normalized:
+            score += 100
+        if "button" in normalized or "role='button" in normalized:
+            score += 80
+        if "select" in normalized:
+            score += 60
+        if "selector='" in normalized:
+            score += 20
+        if normalized.startswith("["):
+            score += 10
+
+        return score
+
+    def _build_action_history_for_prompt(
+        self,
+        trajectory: List[Dict[str, Any]],
+        max_items: int = 8,
+    ) -> List[Dict[str, Any]]:
+        """Build compact action history and keep recent causal events."""
+
+        compact_history: List[Dict[str, Any]] = []
+        for item in trajectory:
+            if not isinstance(item, dict):
+                continue
+
+            if "step" not in item:
+                continue
+
+            action_obj = item.get("action")
+            action_type = ""
+            action_target = ""
+            action_value = ""
+            if isinstance(action_obj, dict):
+                action_type = str(action_obj.get("type", ""))
+                action_target = str(action_obj.get("target", ""))
+                action_value = str(action_obj.get("value", ""))
+
+            env_obs = item.get("observation")
+            env_error = ""
+            env_done = False
+            if isinstance(env_obs, dict):
+                env_error = str(env_obs.get("error", ""))
+                env_done = bool(env_obs.get("done", False))
+
+            compact_history.append(
+                {
+                    "step": item.get("step"),
+                    "action": action_type,
+                    "target": action_target,
+                    "value": action_value,
+                    "done": env_done,
+                    "error": env_error,
+                }
+            )
+
+        return compact_history[-max_items:]
+
+    def _summarize_action_history_for_prompt(self, trajectory: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """Compress long history into a compact summary for ablation baselines."""
+
+        step_events = [item for item in trajectory if isinstance(item, dict) and "step" in item]
+        if not step_events:
+            return []
+
+        action_counts: Dict[str, int] = {}
+        last_failure_signal = ""
+        for item in step_events:
+            action_obj = item.get("action")
+            if isinstance(action_obj, dict):
+                action_type = str(action_obj.get("type", "")).strip().lower() or "unknown"
+                action_counts[action_type] = action_counts.get(action_type, 0) + 1
+
+            if bool(item.get("finish_rejected")):
+                last_failure_signal = str(item.get("finish_reject_reason", "")).strip() or last_failure_signal
+
+            observation = item.get("observation")
+            if isinstance(observation, dict):
+                env_error = str(observation.get("error", "")).strip()
+                if env_error:
+                    last_failure_signal = env_error
+
+        return [
+            {
+                "step_count": len(step_events),
+                "action_counts": action_counts,
+                "last_failure_signal": last_failure_signal,
+            }
+        ]
+
+    def _build_dead_end_memory_for_prompt(
+        self,
+        trajectory: List[Dict[str, Any]],
+        max_items: int = 3,
+    ) -> List[str]:
+        """Summarize truncated failure paths so the agent remembers explored dead ends."""
+
+        step_events = [item for item in trajectory if isinstance(item, dict) and "step" in item]
+        if len(step_events) <= max_items:
+            return []
+
+        dead_end_summaries: List[str] = []
+        seen_signatures: set[Tuple[str, str, str]] = set()
+        older_events = step_events[:-max_items]
+
+        for event in older_events:
+            summary = self._summarize_dead_end_event(event)
+            if summary is None:
+                continue
+
+            signature = (
+                summary["action"].lower(),
+                summary["target"].lower(),
+                summary["reason"].lower(),
+            )
+            if signature in seen_signatures:
+                continue
+
+            seen_signatures.add(signature)
+            dead_end_summaries.append(summary["text"])
+
+        return dead_end_summaries[-self.dead_end_limit :]
+
+    def _summarize_dead_end_event(self, event: Dict[str, Any]) -> Optional[Dict[str, str]]:
+        """Convert one older failed event into a compact causal summary."""
+
+        action_obj = event.get("action")
+        action_type = ""
+        action_target = ""
+        if isinstance(action_obj, dict):
+            action_type = str(action_obj.get("type", "")).strip()
+            action_target = str(action_obj.get("target", "")).strip()
+
+        if str(event.get("error", "")).strip() == "empty_llm_response":
+            llm_reason = str(event.get("llm_error", "")).strip() or "empty_llm_response"
+            return {
+                "action": "llm_request",
+                "target": "",
+                "reason": self._normalize_dead_end_reason(llm_reason),
+                "text": f"LLM request failed with {llm_reason}.",
+            }
+
+        if bool(event.get("finish_rejected")):
+            finish_reason = str(event.get("finish_reject_reason", "")).strip() or "finish_rejected"
+            return {
+                "action": action_type or "finish",
+                "target": action_target,
+                "reason": self._normalize_dead_end_reason(finish_reason),
+                "text": f"Tried finish {self._render_dead_end_target(action_target)}, but it was rejected: {finish_reason}.",
+            }
+
+        observation = event.get("observation")
+        if isinstance(observation, dict):
+            env_error = str(observation.get("error", "")).strip()
+            if env_error:
+                return {
+                    "action": action_type,
+                    "target": action_target,
+                    "reason": self._normalize_dead_end_reason(env_error),
+                    "text": f"Tried {action_type or 'action'} {self._render_dead_end_target(action_target)}, got error: {env_error}.",
+                }
+
+        pre_observation_text = ""
+        post_observation_text = ""
+        pre_observation = event.get("pre_observation")
+        post_observation = event.get("post_observation")
+        if isinstance(pre_observation, dict):
+            pre_observation_text = str(pre_observation.get("observation_text", "")).strip()
+        if isinstance(post_observation, dict):
+            post_observation_text = str(post_observation.get("observation_text", "")).strip()
+
+        if (
+            action_type.lower() in {"click", "press", "goto", "type", "fill"}
+            and pre_observation_text
+            and post_observation_text
+            and pre_observation_text == post_observation_text
+        ):
+            return {
+                "action": action_type,
+                "target": action_target,
+                "reason": "no_state_change",
+                "text": (
+                    f"Tried {action_type} {self._render_dead_end_target(action_target)}, "
+                    "but the page state did not change."
+                ),
+            }
+
+        return None
+
+    @staticmethod
+    def _normalize_dead_end_reason(reason: str) -> str:
+        """Normalize one failure reason for deduplication."""
+
+        cleaned = re.sub(r"\s+", " ", reason.strip().lower())
+        return cleaned[:160]
+
+    @staticmethod
+    def _render_dead_end_target(target: str) -> str:
+        """Render one optional action target for prompt summaries."""
+
+        return target if target else "<no-target>"
+
+    @staticmethod
+    def _format_dead_ends_for_prompt(dead_end_lines: List[str]) -> str:
+        """Serialize dead-end summaries into the prompt slot."""
+
+        if not dead_end_lines:
+            return "None"
+        return "\n".join(f"- {line}" for line in dead_end_lines)
+
+    @staticmethod
+    def _build_global_state_for_prompt(composed_context: str) -> str:
+        """Keep global constraints/context isolated from action history."""
+
+        return composed_context.strip() if composed_context.strip() else "No global state available."
 
     def _infer_completion_from_observation(
         self,
@@ -968,8 +2013,7 @@ class CERAgent:
             return ""
 
         patterns = [
-            r"(?:search\s+for|search|look\s+up)\s+[\"'“”]?([^\n\r\.,;]+)",
-            r"(?:搜索|查找)\s*[\"'“”]?([^\n\r，。,;；]+)",
+            r'(?:search\s+for|search|look\s+up)\s+["\']?([^\n\r\.,;]+)',
         ]
 
         for pattern in patterns:
@@ -977,8 +2021,8 @@ class CERAgent:
             if not match:
                 continue
 
-            candidate = _normalize_space(match.group(1)).strip(" \"'“”")
-            for delimiter in [" 然后", " 并且", " and then", " then", " and "]:
+            candidate = _normalize_space(match.group(1)).strip().strip(chr(34)).strip(chr(39))
+            for delimiter in [" and then", " then", " and "]:
                 if delimiter in candidate:
                     candidate = candidate.split(delimiter)[0].strip()
             if candidate:
@@ -989,44 +2033,149 @@ class CERAgent:
     def _parse_action(self, llm_output: str) -> AgentAction:
         """Parse a structured action from LLM output."""
 
-        final_match = re.search(r"<final-answer>\s*(.*?)\s*</final-answer>", llm_output, flags=re.IGNORECASE | re.DOTALL)
+        cleaned_output = self._strip_markdown_fence(llm_output)
+
+        action_from_json = self._parse_action_from_json(cleaned_output)
+        if action_from_json is not None:
+            return action_from_json
+
+        final_match = re.search(
+            r"<final-answer(?:\s+[^>]*)?>\s*(.*?)\s*</final-answer>",
+            cleaned_output,
+            flags=re.IGNORECASE | re.DOTALL,
+        )
         if final_match:
             return {
                 "type": "finish",
                 "content": final_match.group(1).strip(),
-                "raw": llm_output,
+                "raw": cleaned_output,
             }
 
-        action_match = re.search(r"<action>\s*(.*?)\s*</action>", llm_output, flags=re.IGNORECASE | re.DOTALL)
+        action_match = re.search(
+            r"<action(?:\s+[^>]*)?>\s*(.*?)\s*</action>",
+            cleaned_output,
+            flags=re.IGNORECASE | re.DOTALL,
+        )
         if not action_match:
-            return {"type": "think", "raw": llm_output}
+            return {"type": "think", "raw": cleaned_output}
 
         action_type = _normalize_space(action_match.group(1)).lower()
-        target_match = re.search(r"<target>\s*(.*?)\s*</target>", llm_output, flags=re.IGNORECASE | re.DOTALL)
-        value_match = re.search(r"<value>\s*(.*?)\s*</value>", llm_output, flags=re.IGNORECASE | re.DOTALL)
+        target_match = re.search(
+            r"<target(?:\s+[^>]*)?>\s*(.*?)\s*</target>",
+            cleaned_output,
+            flags=re.IGNORECASE | re.DOTALL,
+        )
+        value_match = re.search(
+            r"<value(?:\s+[^>]*)?>\s*(.*?)\s*</value>",
+            cleaned_output,
+            flags=re.IGNORECASE | re.DOTALL,
+        )
+        url_match = re.search(
+            r"<url(?:\s+[^>]*)?>\s*(.*?)\s*</url>",
+            cleaned_output,
+            flags=re.IGNORECASE | re.DOTALL,
+        )
 
         target = target_match.group(1).strip() if target_match else ""
         value = value_match.group(1).strip() if value_match else ""
+        url = url_match.group(1).strip() if url_match else ""
 
         if action_type in {"finish", "done", "complete", "completed"}:
             return {
                 "type": "finish",
                 "content": value or target,
-                "raw": llm_output,
+                "raw": cleaned_output,
             }
 
-        return {
+        if action_type in {"goto", "navigate"} and url and not target and not value:
+            target = url
+
+        parsed_action: AgentAction = {
             "type": action_type if action_type else "noop",
             "target": target,
             "value": value,
-            "raw": llm_output,
+            "raw": cleaned_output,
         }
+        if url:
+            parsed_action["content"] = url
+        return parsed_action
 
-    def _execute_action(self, action: AgentAction) -> Dict[str, Any]:
-        """Execute one action against injected environment adapter."""
+    @staticmethod
+    def _strip_markdown_fence(text: str) -> str:
+        """Remove surrounding markdown code fence when model wraps JSON/XML."""
+
+        cleaned = text.strip()
+        if not cleaned.startswith("```"):
+            return cleaned
+
+        fence_match = re.match(r"^```[a-zA-Z0-9_-]*\s*(.*?)\s*```$", cleaned, flags=re.DOTALL)
+        if not fence_match:
+            return cleaned
+        return fence_match.group(1).strip()
+
+    def _parse_action_from_json(self, text: str) -> Optional[AgentAction]:
+        """Parse action from strict/near-strict JSON object output."""
+
+        candidate = text.strip()
+        if not candidate:
+            return None
+
+        if not (candidate.startswith("{") and candidate.endswith("}")):
+            first_brace = candidate.find("{")
+            last_brace = candidate.rfind("}")
+            if first_brace == -1 or last_brace == -1 or last_brace <= first_brace:
+                return None
+            candidate = candidate[first_brace : last_brace + 1]
 
         try:
-            # TODO: 接入 BrowserGym 执行动作
+            parsed = json.loads(candidate)
+        except json.JSONDecodeError:
+            return None
+
+        if not isinstance(parsed, dict):
+            return None
+
+        action_type = str(parsed.get("action", parsed.get("type", ""))).strip().lower()
+        target = str(parsed.get("target", "")).strip()
+        value = str(parsed.get("value", "")).strip()
+        url = str(parsed.get("url", "")).strip()
+        final_answer = str(parsed.get("final_answer", parsed.get("content", ""))).strip()
+
+        if final_answer:
+            return {
+                "type": "finish",
+                "content": final_answer,
+                "raw": text,
+            }
+
+        if action_type in {"finish", "done", "complete", "completed"}:
+            return {
+                "type": "finish",
+                "content": final_answer or value or target,
+                "raw": text,
+            }
+
+        if not action_type:
+            return None
+
+        if action_type in {"goto", "navigate"} and url and not target and not value:
+            target = url
+
+        result: AgentAction = {
+            "type": action_type,
+            "target": target,
+            "value": value,
+            "raw": text,
+        }
+        if url:
+            result["content"] = url
+        return result
+
+    def _legacy_execute_action_unchecked(self, action: AgentAction) -> Dict[str, Any]:
+        """Legacy unchecked action executor kept for debugging/reference."""
+
+        try:
+            # TODO: 閹恒儱鍙?BrowserGym 閹笛嗩攽閸斻劋缍?
             if hasattr(self.environment, "execute_action") and callable(getattr(self.environment, "execute_action")):
                 return cast(EnvironmentLike, self.environment).execute_action(action)
             if callable(self.environment):
@@ -1094,6 +2243,235 @@ class CERAgent:
             preview = f"{preview} | ...(+{remaining})"
         return preview
 
+    def _execute_action(self, action: AgentAction, current_observation: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        """Execute one action against injected environment adapter."""
+
+        try:
+            violation_error = self._evaluate_security_policy(action, current_observation) if self.enable_static_interceptor else None
+            if violation_error is not None:
+                return {
+                    "done": False,
+                    "error": violation_error,
+                }
+
+            if hasattr(self.environment, "execute_action") and callable(getattr(self.environment, "execute_action")):
+                return cast(EnvironmentLike, self.environment).execute_action(action)
+            if callable(self.environment):
+                return cast(Callable[[AgentAction], Dict[str, Any]], self.environment)(action)
+            return {
+                "done": False,
+                "error": "Environment does not implement execute_action and is not callable.",
+            }
+        except Exception as exc:
+            return {"done": False, "error": f"action_execution_failed: {exc}"}
+
+    @staticmethod
+    def _looks_like_relative_navigation_target(target: str) -> bool:
+        cleaned = str(target or "").strip()
+        if not cleaned:
+            return False
+        if cleaned.startswith(("/", "./", "../", "#", "?")):
+            return True
+        if re.match(r"^[a-zA-Z][a-zA-Z0-9+.-]*://", cleaned) or cleaned.startswith("//"):
+            return False
+
+        lowered = cleaned.lower()
+        if lowered.endswith((".html", ".htm", ".php", ".asp", ".aspx", ".jsp")):
+            return True
+        return "." not in cleaned and ":" not in cleaned
+
+    def _normalize_navigation_target_for_policy(
+        self,
+        target: str,
+        current_observation: Optional[Dict[str, Any]] = None,
+    ) -> str:
+        cleaned = str(target or "").strip()
+        if not cleaned:
+            return cleaned
+        if re.match(r"^[a-zA-Z][a-zA-Z0-9+.-]*://", cleaned):
+            return cleaned
+        if cleaned.startswith("//"):
+            base_url = str((current_observation or {}).get("url", "") if isinstance(current_observation, dict) else "").strip()
+            base_scheme = urlsplit(base_url).scheme or "http"
+            return f"{base_scheme}:{cleaned}"
+        if self._looks_like_relative_navigation_target(cleaned):
+            base_url = str((current_observation or {}).get("url", "") if isinstance(current_observation, dict) else "").strip()
+            base_scheme = urlsplit(base_url).scheme.lower() if base_url else ""
+            if base_scheme not in {"http", "https", "file"}:
+                fallback_start_url = str((current_observation or {}).get("start_url", "") if isinstance(current_observation, dict) else "").strip()
+                if fallback_start_url:
+                    base_url = fallback_start_url
+            return urljoin(base_url, cleaned) if base_url else cleaned
+        return f"http://{cleaned}"
+
+    @staticmethod
+    def _contains_high_risk_keyword(text: str, keyword: str) -> bool:
+        normalized_text = str(text or "").strip().lower()
+        normalized_keyword = str(keyword or "").strip().lower()
+        if not normalized_text or not normalized_keyword:
+            return False
+        if re.fullmatch(r"[a-z0-9]+", normalized_keyword):
+            pattern = rf"(?<![a-z0-9]){re.escape(normalized_keyword)}(?![a-z0-9])"
+            return re.search(pattern, normalized_text) is not None
+        return normalized_keyword in normalized_text
+
+    def _evaluate_security_policy(
+        self,
+        action: AgentAction,
+        current_observation: Optional[Dict[str, Any]] = None,
+    ) -> Optional[str]:
+        """Return a violation string when an action breaks the static security policy."""
+
+        action_type = str(action.get("type", "")).strip().lower()
+        url = str(action.get("url", action.get("content", ""))).strip()
+        target = str(action.get("target", "")).strip()
+        value = str(action.get("value", "")).strip()
+
+        if action_type in {"goto", "navigate"}:
+            allowed_domains = self.security_policy.get("allowed_domains", [])
+            if allowed_domains:
+                parsed = urlsplit(self._normalize_navigation_target_for_policy(url or target or value, current_observation))
+                netloc = parsed.netloc.strip().lower()
+                if ":" in netloc:
+                    netloc = netloc.split(":", 1)[0]
+
+                if not netloc:
+                    return "Security Violation: Domain not in allowed_domains list."
+
+                is_allowed = False
+                for allowed_domain in allowed_domains:
+                    normalized_domain = str(allowed_domain).strip().lower()
+                    if not normalized_domain:
+                        continue
+                    if netloc == normalized_domain or netloc.endswith(f".{normalized_domain}"):
+                        is_allowed = True
+                        break
+
+                if not is_allowed:
+                    return "Security Violation: Domain not in allowed_domains list."
+
+        normalized_target = target.lower()
+        normalized_value = value.lower()
+        metadata_text = self._get_target_metadata_text(target)
+        for keyword in self.security_policy.get("high_risk_keywords", []):
+            normalized_keyword = str(keyword).strip().lower()
+            if not normalized_keyword:
+                continue
+            if (
+                self._contains_high_risk_keyword(normalized_target, normalized_keyword)
+                or self._contains_high_risk_keyword(normalized_value, normalized_keyword)
+                or self._contains_high_risk_keyword(metadata_text, normalized_keyword)
+            ):
+                return f"Security Violation: Action contains high-risk keyword '{keyword}'."
+
+        return None
+
+    def _get_target_metadata_text(self, target: str) -> str:
+        """Flatten environment target metadata into searchable lowercase text."""
+
+        cleaned_target = target.strip()
+        if not cleaned_target:
+            return ""
+
+        selector_markers = ("#", ".", "[", "]", ">", ":", "//", "(", "=", "css=", "xpath=")
+        lowered_target = cleaned_target.lower()
+        looks_like_plain_text = not any(marker in cleaned_target for marker in selector_markers) and not any(
+            token in lowered_target for token in ("input", "button", "textarea", "selector", "nth-of-type")
+        )
+        if looks_like_plain_text:
+            return lowered_target
+
+        try:
+            if hasattr(self.environment, "get_target_metadata") and callable(getattr(self.environment, "get_target_metadata")):
+                metadata = getattr(self.environment, "get_target_metadata")(cleaned_target)
+            else:
+                metadata = {}
+        except Exception:
+            metadata = {}
+
+        if not isinstance(metadata, dict):
+            return ""
+
+        fields = [
+            str(metadata.get("selector", "")),
+            str(metadata.get("role", "")),
+            str(metadata.get("text", "")),
+            str(metadata.get("aria_label", "")),
+            str(metadata.get("name", "")),
+            str(metadata.get("tag", "")),
+            str(metadata.get("type", "")),
+            str(metadata.get("title", "")),
+        ]
+        return " ".join(value.strip().lower() for value in fields if value and value.strip())
+
+    def _build_prompt_metadata(
+        self,
+        prompt: str,
+        observation: Dict[str, Any],
+        trajectory: List[Dict[str, Any]],
+        global_constraints: str,
+        termination_routing: Dict[str, Any],
+        use_isolation: bool,
+    ) -> Dict[str, Any]:
+        """Capture prompt composition statistics for benchmark reports."""
+
+        if self.history_mode == "summary":
+            history_payload: Any = self._summarize_action_history_for_prompt(trajectory)
+        else:
+            history_payload = self._build_action_history_for_prompt(
+                trajectory,
+                max_items=self.action_history_limit,
+            )
+        dead_end_lines = (
+            self._build_dead_end_memory_for_prompt(trajectory)
+            if self.enable_dead_end_memory
+            else []
+        )
+        observation_block = self._format_observation_for_prompt(observation)
+        termination_routing_block = self._format_termination_routing_for_prompt(termination_routing)
+        return {
+            "total_chars": len(prompt),
+            "total_tokens_est": max(len(prompt) // 4, 1),
+            "constraint_block_chars": len(global_constraints.strip()) if use_isolation else 0,
+            "repeated_constraint_chars": len(global_constraints.strip()) if self.repeat_constraints_each_step else 0,
+            "dead_end_block_chars": len("\n".join(dead_end_lines)),
+            "termination_block_chars": len(termination_routing_block),
+            "history_block_chars": len(json.dumps(history_payload, ensure_ascii=True)),
+            "observation_block_chars": len(observation_block),
+            "history_mode": self.history_mode,
+            "use_isolation": use_isolation,
+        }
+
+    def _get_environment_state_signature(self, observation: Dict[str, Any]) -> str:
+        """Return a stable signature for the current environment state."""
+
+        signature = str(observation.get("state_signature", "")).strip()
+        if signature:
+            return signature
+
+        try:
+            if hasattr(self.environment, "get_state_signature") and callable(
+                getattr(self.environment, "get_state_signature")
+            ):
+                candidate = getattr(self.environment, "get_state_signature")()
+                if isinstance(candidate, str) and candidate.strip():
+                    return candidate.strip()
+        except Exception:
+            pass
+
+        digest_source = json.dumps(
+            {
+                "url": observation.get("url", ""),
+                "title": observation.get("title", ""),
+                "observation_text": observation.get("observation_text", ""),
+                "elements": observation.get("elements", []),
+                "a11y_nodes": observation.get("a11y_nodes", []),
+            },
+            ensure_ascii=True,
+            sort_keys=True,
+        )
+        return hashlib.sha1(digest_source.encode("utf-8")).hexdigest()
+
     def _trajectory_to_text(
         self,
         task_goal: str,
@@ -1112,7 +2490,7 @@ class CERAgent:
         body = json.dumps(trajectory, ensure_ascii=True, indent=2)
         return header + body
 
-    def _call_llm_api(self, prompt: str) -> str:
+    def _call_llm_api(self, prompt: str) -> Tuple[str, int, float]:
         """Unified LLM call shell.
 
         You can fill api_url/model/payload details according to your provider.
@@ -1122,6 +2500,11 @@ class CERAgent:
         if self.model:
             payload["model"] = self.model
         return _safe_llm_request(self.api_url, self.headers, payload)
+
+    def _call_agent_llm(self, prompt: str, observation: Dict[str, Any]) -> Tuple[str, int, float]:
+        """Call the action model, optionally using richer observation payloads."""
+
+        return self._call_llm_api(prompt)
 
 
 class MockEnvironment:
@@ -1150,35 +2533,110 @@ def get_last_llm_error() -> str:
     return _LAST_LLM_ERROR
 
 
-def _safe_llm_request(api_url: str, headers: Dict[str, str], payload: Dict[str, Any]) -> str:
-    """Perform a defensive LLM HTTP call and return extracted text output."""
+def _format_llm_request_exception(exc: requests.exceptions.RequestException) -> str:
+    """Return a compact, artifact-friendly request error label."""
+
+    parts = [f"request_exception:{exc.__class__.__name__}"]
+    response = getattr(exc, "response", None)
+    if response is None:
+        return ":".join(parts)
+
+    status_code = getattr(response, "status_code", 0)
+    if status_code:
+        parts.append(f"status={status_code}")
+
+    try:
+        payload = response.json()
+    except ValueError:
+        payload = None
+
+    if isinstance(payload, dict):
+        error_block = payload.get("error")
+        if isinstance(error_block, dict):
+            provider_code = str(error_block.get("code", "")).strip()
+            if provider_code:
+                parts.append(f"provider_code={provider_code}")
+
+    return ":".join(parts)
+
+
+def _safe_llm_request(
+    api_url: str,
+    headers: Dict[str, str],
+    payload: Dict[str, Any],
+) -> Tuple[str, int, float]:
+    """Perform a defensive LLM HTTP call and return text, token count, and latency."""
 
     global _LAST_LLM_ERROR
 
     if not api_url.strip():
         _LAST_LLM_ERROR = "empty_api_url"
-        return ""
+        return "", 0, 0.0
 
+    timeout_seconds = _resolve_llm_timeout_seconds()
+
+    started_at = time.time()
     try:
-        response = requests.post(api_url, headers=headers, json=payload, timeout=15)
+        response = requests.post(api_url, headers=headers, json=payload, timeout=timeout_seconds)
         response.raise_for_status()
     except requests.exceptions.RequestException as exc:
-        _LAST_LLM_ERROR = f"request_exception:{exc.__class__.__name__}"
-        return ""
+        _LAST_LLM_ERROR = _format_llm_request_exception(exc)
+        latency_ms = (time.time() - started_at) * 1000.0
+        return "", 0, latency_ms
 
     try:
         data = response.json()
     except ValueError:
         _LAST_LLM_ERROR = "invalid_json_response"
-        return ""
+        latency_ms = (time.time() - started_at) * 1000.0
+        return "", 0, latency_ms
 
+    latency_ms = (time.time() - started_at) * 1000.0
+    total_tokens = _extract_total_tokens_from_llm_json(data)
     extracted = _extract_text_from_llm_json(data)
     if not extracted.strip():
         _LAST_LLM_ERROR = "empty_text_output"
-        return ""
+        return "", total_tokens, latency_ms
 
     _LAST_LLM_ERROR = ""
-    return extracted
+    return extracted, total_tokens, latency_ms
+
+
+def _extract_total_tokens_from_llm_json(data: Any) -> int:
+    """Best-effort extraction of total token usage from common LLM JSON responses."""
+
+    if not isinstance(data, dict):
+        return 0
+
+    usage = data.get("usage")
+    if not isinstance(usage, dict):
+        return 0
+
+    total_tokens = usage.get("total_tokens", 0)
+    if isinstance(total_tokens, int):
+        return max(total_tokens, 0)
+
+    try:
+        return max(int(total_tokens), 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _resolve_llm_timeout_seconds(default_timeout: float = 60.0) -> float:
+    """Resolve request timeout from environment with defensive fallback."""
+
+    raw_timeout = os.getenv("CER_LLM_TIMEOUT_SECONDS", "").strip()
+    if not raw_timeout:
+        return default_timeout
+
+    try:
+        parsed_timeout = float(raw_timeout)
+    except ValueError:
+        return default_timeout
+
+    if parsed_timeout <= 0:
+        return default_timeout
+    return parsed_timeout
 
 
 def _extract_text_from_llm_json(data: Any) -> str:
@@ -1217,6 +2675,35 @@ def _extract_text_from_llm_json(data: Any) -> str:
     return ""
 
 
+def _extract_first_json_object(text: str) -> Optional[Dict[str, Any]]:
+    """Extract first JSON object from raw model text, tolerating wrappers."""
+
+    cleaned = text.strip()
+    if not cleaned:
+        return None
+
+    # Strip a surrounding markdown code fence if present.
+    fence_match = re.match(r"^```[a-zA-Z0-9_-]*\s*(.*?)\s*```$", cleaned, flags=re.DOTALL)
+    if fence_match:
+        cleaned = fence_match.group(1).strip()
+
+    candidates = [cleaned]
+    first_brace = cleaned.find("{")
+    last_brace = cleaned.rfind("}")
+    if first_brace != -1 and last_brace != -1 and last_brace > first_brace:
+        candidates.append(cleaned[first_brace : last_brace + 1])
+
+    for candidate in candidates:
+        try:
+            parsed = json.loads(candidate)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(parsed, dict):
+            return parsed
+
+    return None
+
+
 def _normalize_space(text: str) -> str:
     """Normalize all whitespace runs to a single space."""
 
@@ -1228,3 +2715,4 @@ def _normalize_multiline(text: str) -> str:
 
     lines = [line.strip() for line in text.strip().splitlines() if line.strip()]
     return "\n".join(lines)
+

@@ -1,0 +1,26 @@
+{
+  "task_id": "web_deadend_premature_finish_003",
+  "task_family": "deadend_premature_finish",
+  "goal": "Do not conclude before the latch is released; clear the loop, open the evidence drawer, and then finish.",
+  "global_constraints": [
+    "Do not finish until evidence is ready.",
+    "Final answer must be exactly 'DRAWER VERIFIED AFTER RELEASE'."
+  ],
+  "environment_type": "playwright",
+  "environment_name": "local_web_fixture",
+  "start_state": {
+    "fixture_path": "fixtures/web/deadend_finish_drawer.html"
+  },
+  "success_checker": {
+    "type": "exact_final_answer"
+  },
+  "risk_tags": [
+    "dead_end_memory",
+    "premature_finish",
+    "web_fixture"
+  ],
+  "max_steps": 12,
+  "difficulty": "hard",
+  "expected_final_answer": "DRAWER VERIFIED AFTER RELEASE",
+  "notes": "Drawer-layout web fixture for dead-end recovery plus termination correctness."
+}

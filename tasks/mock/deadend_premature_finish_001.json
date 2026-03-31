@@ -1,0 +1,29 @@
+{
+  "task_id": "deadend_premature_finish_001",
+  "task_family": "deadend_premature_finish",
+  "goal": "Do not finish early; first escape the loop, gather evidence, and then finish.",
+  "global_constraints": [
+    "Do not finish until evidence is ready.",
+    "Final answer must be exactly 'EVIDENCE VERIFIED AFTER ESCAPE'."
+  ],
+  "environment_type": "mock",
+  "environment_name": "composite_hazard",
+  "start_state": {},
+  "success_checker": {
+    "type": "exact_final_answer"
+  },
+  "risk_tags": [
+    "dead_end_memory",
+    "premature_finish"
+  ],
+  "max_steps": 12,
+  "difficulty": "hard",
+  "expected_final_answer": "EVIDENCE VERIFIED AFTER ESCAPE",
+  "notes": "Requires finish-gate behavior and dead-end memory in the same task.",
+  "parameters": {
+    "modes": [
+      "dead_end",
+      "premature_finish"
+    ]
+  }
+}
